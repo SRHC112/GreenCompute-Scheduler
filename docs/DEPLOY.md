@@ -183,3 +183,29 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 - [ ] GitHub 网页端 README 正常渲染，`LICENSE` 显示为 Apache-2.0；
 - [ ] 仓库中不存在 `.env`、`__pycache__`、`runs/run_*`；
 - [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，12 个冒烟测试全绿。
+
+---
+
+## 十、持续集成（GitHub Actions）
+
+工作流文件：`.github/workflows/ci.yml`（随代码一起版本化，改 CI 也走正常 PR 流程）。
+
+| 项 | 配置 |
+|---|---|
+| 触发 | `push` / `pull_request` 到 `main`、`workflow_dispatch` 手动触发 |
+| 权限 | `contents: read`（最小权限，不申请写权限） |
+| 并发 | 同一 ref 只保留最新一次运行，自动取消旧运行 |
+| `test` job | Ubuntu × Python 3.10/3.11/3.12/3.13，另加 Windows × Python 3.13 |
+| `evaluation` job | Ubuntu × Python 3.13，跑六组对照实验并校验结果完整性 |
+
+**检查项**：`compileall` 语法检查 → `unittest` 12 用例 → `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与 18 行 CSV 校验。
+
+**查看结果**：仓库首页 Actions 标签页，或 README 顶部的 CI 徽章。失败的 Artifact 仍会上传，便于下载 `console.html` / `results.csv` 定位问题。
+
+**注意事项 / 常见坑**
+
+1. CI 里 `python evaluation/run_eval.py` 会重新生成 `evaluation/` 下的结果文件，但**只在 runner 的工作区生效，不会提交回仓库**；本地重跑才会产生 `git diff`。
+2. `results.csv` 以 `utf-8-sig`（带 BOM）写出，脚本里读取必须用 `encoding="utf-8-sig"`，否则首列字段名会变成 `\ufeffgroup`。
+3. 工作流使用 `shell: python` 做跨平台产物校验，避免在 Windows runner 上写两套 bash/PowerShell 脚本。
+4. 新增 Python 版本支持时，同步改矩阵与 README 里的环境要求；`setup-python` 的 pip 缓存依赖 `requirements.txt`，改依赖名要一并检查。
+5. CI 不需要任何 Secret；项目可选的大模型配置（`GCS_LLM_*`）不参与 CI，系统按离线确定性模式运行，指标数值不受影响。

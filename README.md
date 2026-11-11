@@ -1,5 +1,9 @@
 # 绿算调度 GreenCompute-Scheduler
 
+[![CI](https://github.com/SRHC112/GreenCompute-Scheduler/actions/workflows/ci.yml/badge.svg)](https://github.com/SRHC112/GreenCompute-Scheduler/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
+
 > 面向宁夏（中卫—银川）算力枢纽的**多智能体算力调度编排系统**
 > 2026 第五届"未来杯"创新大赛 · 赛道一：Agent 编排创新应用
 > 仓库：<https://github.com/SRHC112/GreenCompute-Scheduler> · 主分支：`main` · 许可：Apache-2.0
@@ -146,6 +150,18 @@ python evaluation/run_eval.py
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
 4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行。
+
+### 4.1 GitHub Actions 自动验证
+
+推送到 `main` 或提交 PR 时，`.github/workflows/ci.yml` 会自动执行（也可在 Actions 页面手动触发）：
+
+| Job | 覆盖内容 |
+|---|---|
+| `test` | Ubuntu × Python 3.10 / 3.11 / 3.12 / 3.13 + Windows × 3.13；语法编译、12 个冒烟测试、一键编排、看板产物校验、操作台 HTTP 探测 |
+| `evaluation` | 六组对照实验，校验 `results.csv` 为 18 行且每组 3 次，检查三份报告文件 |
+
+看板与评测报告会作为 Artifact 上传，分别保留 7 / 14 天，可在 Actions 运行页下载。
+CI 使用的命令与本文第三、四节完全一致，因此**本地能跑通 ≈ CI 能跑通**；工作流细节与常见坑见 [docs/DEPLOY.md](docs/DEPLOY.md) 第十节。
 
 ---
 

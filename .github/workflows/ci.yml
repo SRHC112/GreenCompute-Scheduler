@@ -1,0 +1,156 @@
+# 绿算调度 GreenCompute-Scheduler · 持续集成
+#
+# 触发：main 分支 push / PR、手动触发
+# 目标：任何一台干净机器 clone 后都能复现「安装 → 冒烟测试 → 编排演示 → 对照实验 → 操作台」
+# 原则：不引入项目本身以外的依赖；CI 命令与 README 的运行方法保持一致。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试 (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          # 项目主要在 Windows 上开发，额外覆盖一次 Windows + 最新 Python
+          - os: windows-latest
+            python-version: "3.13"
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 语法检查（全量编译）
+        run: python -m compileall -q gcs app evaluation tests
+
+      - name: 冒烟测试（12 个用例）
+        run: python -m unittest discover -s tests -v
+
+      - name: 一键编排演示
+        run: python -m gcs.demo --jobs 20 --seed 7
+
+      # 用 python 作为 shell，保证同一段校验脚本在 Ubuntu / Windows runner 上都能跑
+      - name: 校验看板与指标产物
+        shell: python
+        run: |
+          from pathlib import Path
+          root = Path("runs")
+          latest = root / "latest.html"
+          assert latest.is_file() and latest.stat().st_size > 0, "缺少 runs/latest.html"
+          html = list(root.glob("run_*_full/console.html"))
+          metrics = list(root.glob("run_*_full/metrics.json"))
+          assert html and metrics, "缺少 console.html / metrics.json"
+          print(f"产物校验通过：{len(html)} 份看板，latest.html {latest.stat().st_size} 字节")
+
+      - name: 可视化操作台启动检查（仅 Linux）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python app/server.py --port 8123 &
+          PID=$!
+          OK=0
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8123/ > /dev/null; then OK=1; break; fi
+            sleep 0.5
+          done
+          kill "$PID" 2>/dev/null || true
+          if [ "$OK" -ne 1 ]; then echo "操作台未能在 10 秒内响应"; exit 1; fi
+          echo "操作台 HTTP 响应正常"
+
+      - name: 上传演示产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            runs/latest.html
+            runs/run_*_full/console.html
+            runs/run_*_full/report.md
+            runs/run_*_full/metrics.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  evaluation:
+    name: 对照实验 (6 组 × 3 种子)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 运行六组对照实验
+        run: python evaluation/run_eval.py
+
+      # 注意：run_eval.py 用 utf-8-sig 写 CSV（带 BOM），读取时必须用同一编码
+      - name: 校验评测结果完整性
+        shell: python
+        run: |
+          import csv
+          from collections import Counter
+          from pathlib import Path
+          p = Path("evaluation/results.csv")
+          with p.open(encoding="utf-8-sig", newline="") as f:
+              rows = list(csv.DictReader(f))
+          assert len(rows) == 18, f"应有 18 行(6 组 × 3 种子)，实际 {len(rows)}"
+          groups = Counter(r["group"] for r in rows)
+          assert len(groups) == 6 and set(groups.values()) == {3}, f"分组异常: {groups}"
+          for name in ("summary.md", "summary.json", "eval_report.html"):
+              q = Path("evaluation") / name
+              assert q.is_file() and q.stat().st_size > 0, f"缺少 {name}"
+          print(f"评测结果校验通过：{len(rows)} 行，分组 {dict(groups)}")
+
+      - name: 上传评测报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-report
+          path: |
+            evaluation/results.csv
+            evaluation/summary.md
+            evaluation/summary.json
+            evaluation/eval_report.html
+          if-no-files-found: ignore
+          retention-days: 14
