@@ -60,18 +60,25 @@ jobs:
       - name: 一键编排演示
         run: python -m gcs.demo --jobs 20 --seed 7
 
-      # 用 python 作为 shell，保证同一段校验脚本在 Ubuntu / Windows runner 上都能跑
+      # 用 python 作为 shell，保证同一段校验脚本在 Ubuntu / Windows runner 上都能跑。
+      # 注意：Windows runner 的 stdout 默认 cp1252，输出中文会抛 UnicodeEncodeError，
+      # 因此此处统一用 ASCII 英文输出，并显式把 stdout 切到 UTF-8 兜底。
       - name: 校验看板与指标产物
         shell: python
         run: |
+          import sys
           from pathlib import Path
+          try:
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          except Exception:
+              pass
           root = Path("runs")
           latest = root / "latest.html"
-          assert latest.is_file() and latest.stat().st_size > 0, "缺少 runs/latest.html"
+          assert latest.is_file() and latest.stat().st_size > 0, "missing runs/latest.html"
           html = list(root.glob("run_*_full/console.html"))
           metrics = list(root.glob("run_*_full/metrics.json"))
-          assert html and metrics, "缺少 console.html / metrics.json"
-          print(f"产物校验通过：{len(html)} 份看板，latest.html {latest.stat().st_size} 字节")
+          assert html and metrics, "missing console.html / metrics.json"
+          print(f"OK: {len(html)} dashboard(s), latest.html {latest.stat().st_size} bytes")
 
       - name: 可视化操作台启动检查（仅 Linux）
         if: runner.os == 'Linux'
@@ -124,23 +131,29 @@ jobs:
       - name: 运行六组对照实验
         run: python evaluation/run_eval.py
 
-      # 注意：run_eval.py 用 utf-8-sig 写 CSV（带 BOM），读取时必须用同一编码
+      # 注意：run_eval.py 用 utf-8-sig 写 CSV（带 BOM），读取时必须用同一编码。
+      # 输出同样保持 ASCII，兼容 Windows runner 的 cp1252 stdout。
       - name: 校验评测结果完整性
         shell: python
         run: |
           import csv
+          import sys
           from collections import Counter
           from pathlib import Path
+          try:
+              sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+          except Exception:
+              pass
           p = Path("evaluation/results.csv")
           with p.open(encoding="utf-8-sig", newline="") as f:
               rows = list(csv.DictReader(f))
-          assert len(rows) == 18, f"应有 18 行(6 组 × 3 种子)，实际 {len(rows)}"
+          assert len(rows) == 18, f"expected 18 rows (6 groups x 3 seeds), got {len(rows)}"
           groups = Counter(r["group"] for r in rows)
-          assert len(groups) == 6 and set(groups.values()) == {3}, f"分组异常: {groups}"
+          assert len(groups) == 6 and set(groups.values()) == {3}, f"bad group distribution: {groups}"
           for name in ("summary.md", "summary.json", "eval_report.html"):
               q = Path("evaluation") / name
-              assert q.is_file() and q.stat().st_size > 0, f"缺少 {name}"
-          print(f"评测结果校验通过：{len(rows)} 行，分组 {dict(groups)}")
+              assert q.is_file() and q.stat().st_size > 0, f"missing {name}"
+          print(f"OK: {len(rows)} rows, groups {dict(groups)}")
 
       - name: 上传评测报告
         if: always()

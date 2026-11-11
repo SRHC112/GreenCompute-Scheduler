@@ -206,6 +206,6 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 
 1. CI 里 `python evaluation/run_eval.py` 会重新生成 `evaluation/` 下的结果文件，但**只在 runner 的工作区生效，不会提交回仓库**；本地重跑才会产生 `git diff`。
 2. `results.csv` 以 `utf-8-sig`（带 BOM）写出，脚本里读取必须用 `encoding="utf-8-sig"`，否则首列字段名会变成 `\ufeffgroup`。
-3. 工作流使用 `shell: python` 做跨平台产物校验，避免在 Windows runner 上写两套 bash/PowerShell 脚本。
+3. 工作流使用 `shell: python` 做跨平台产物校验，避免在 Windows runner 上写两套 bash/PowerShell 脚本。但 **Windows runner 的 stdout 默认 cp1252**，脚本里的中文 `print` 会抛 `UnicodeEncodeError`（2026-11-11 首次运行 Windows job 即因此失败，其余 5 个 job 全绿）。因此校验脚本统一用 ASCII 英文输出，并在开头 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` 兜底；新增校验步骤请沿用该约定。
 4. 新增 Python 版本支持时，同步改矩阵与 README 里的环境要求；`setup-python` 的 pip 缓存依赖 `requirements.txt`，改依赖名要一并检查。
 5. CI 不需要任何 Secret；项目可选的大模型配置（`GCS_LLM_*`）不参与 CI，系统按离线确定性模式运行，指标数值不受影响。
