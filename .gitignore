@@ -29,3 +29,8 @@ Thumbs.db
 # 临时文件与日志
 evaluation/*.tmp
 *.log
+
+# 安装脚本生成的运行入口与只读预检探针（不入库）
+run.bat
+run.sh
+.gcs_install_probe

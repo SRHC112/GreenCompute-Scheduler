@@ -54,6 +54,12 @@ jobs:
       - name: 语法检查（全量编译）
         run: python -m compileall -q gcs app evaluation tests
 
+      # 安装脚本随 PR 一起校验：语法 + 只读预检（--check 不 clone、不写入）
+      - name: 安装脚本自检
+        run: |
+          python -m py_compile install.py
+          python install.py --check
+
       - name: 冒烟测试（12 个用例）
         run: python -m unittest discover -s tests -v
 

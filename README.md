@@ -34,9 +34,77 @@
 
 ---
 
-## 二、安装（3 步）
+## 二、安装
 
-### Windows（PowerShell / CMD）
+### 2.1 一键安装（推荐）
+
+只需 **Python 3.10+**；安装脚本本身只用标准库，运行前不需要装任何依赖。
+
+**方式 A：已下载或 clone 了整个项目**
+
+```bat
+:: Windows：双击 install.bat，或在项目目录执行
+install.bat
+```
+
+```bash
+# macOS / Linux
+bash install.sh
+```
+
+也可跨平台统一执行 `python install.py`。
+
+**方式 B：只下载了 `install.py` 单个文件**
+
+把脚本放到任意空目录后运行，它会自动 clone 源码到 `./GreenCompute-Scheduler` 并完成安装：
+
+```bash
+python install.py
+python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
+```
+
+**脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
+→ 跑 12 个冒烟测试与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
+
+**唯一的一次交互确认**
+
+```
+是否接入大模型（OpenAI 兼容接口，如 DeepSeek / GLM / Qwen）？
+  接入：模型负责归因叙述与语义 Judge；不接入：使用离线确定性模式，
+  全流程可跑通且指标数值不变。
+  请选择 [y/N]：
+```
+
+| 选择 | 脚本行为 |
+|---|---|
+| **不接入**（直接回车 / `n`） | 跳过全部模型配置，**不创建 `.env`**，继续完成安装；系统按离线确定性模式运行，指标数值不变 |
+| **接入**（`y`） | 依次询问接口地址、模型名、API Key（可回车用默认值，Key 输入不回显），写入 `.env` 并回读校验，确认项目进入 `online` 模式；**不实际调用模型接口**，不会消耗额度 |
+
+> `.env` 由运行入口在启动时加载为环境变量——项目本身只读 `os.getenv`，不会自动读 `.env`，
+> 因此**不需要改动任何现有源码**。已存在的 `.venv` / `.env` / `run.bat` / `run.sh` 一律不覆盖，脚本可重复运行。
+> 自动化场景：`python install.py --no-llm`（离线）或 `--llm`（配合 `GCS_LLM_*` 环境变量）可完全免交互；
+> `--check` 只做只读预检。
+
+**安装完成后的快捷运行**（无需手动激活虚拟环境）
+
+```bat
+run.bat demo        :: 完整编排演示
+run.bat server      :: 启动可视化操作台
+run.bat test        :: 冒烟测试
+run.bat eval        :: 对照实验
+```
+
+```bash
+./run.sh demo       # macOS / Linux
+python install.py --run -- python -m gcs.demo --policy fcfs   # 自定义命令
+```
+
+> 完整的命令、参数与产物说明见「三、运行方法」；手工安装方式与本文后续原有命令完全不受影响。
+
+### 2.2 手动安装（3 步）
+
+#### Windows（PowerShell / CMD）
 
 ```bat
 git clone https://github.com/SRHC112/GreenCompute-Scheduler.git
@@ -49,7 +117,7 @@ python -m pip install -r requirements.txt
 python -c "import yaml; print('PyYAML', yaml.__version__)"
 ```
 
-### macOS / Linux
+#### macOS / Linux
 
 ```bash
 git clone https://github.com/SRHC112/GreenCompute-Scheduler.git

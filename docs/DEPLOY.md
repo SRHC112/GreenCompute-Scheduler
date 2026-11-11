@@ -209,3 +209,33 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 3. 工作流使用 `shell: python` 做跨平台产物校验，避免在 Windows runner 上写两套 bash/PowerShell 脚本。但 **Windows runner 的 stdout 默认 cp1252**，脚本里的中文 `print` 会抛 `UnicodeEncodeError`（2026-11-11 首次运行 Windows job 即因此失败，其余 5 个 job 全绿）。因此校验脚本统一用 ASCII 英文输出，并在开头 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` 兜底；新增校验步骤请沿用该约定。
 4. 新增 Python 版本支持时，同步改矩阵与 README 里的环境要求；`setup-python` 的 pip 缓存依赖 `requirements.txt`，改依赖名要一并检查。
 5. CI 不需要任何 Secret；项目可选的大模型配置（`GCS_LLM_*`）不参与 CI，系统按离线确定性模式运行，指标数值不受影响。
+
+---
+
+## 十一、一键安装脚本
+
+| 文件 | 作用 |
+|---|---|
+| `install.py` | 唯一的安装逻辑（仅标准库，可单独下载运行） |
+| `install.bat` / `install.sh` | 双击 / 直接执行的薄入口，只负责找到 Python 并转发参数 |
+| `run.bat` / `run.sh` | **安装时生成**、已被 `.gitignore` 忽略；用 `.venv` 运行项目 |
+
+**配置如何生效**：`ModelGateway` 只读 `os.getenv("GCS_LLM_*")`，项目不会自动加载 `.env`。
+因此 `.env`（安装时可选生成）由 `python install.py --run ...` 读取后注入子进程的**环境变量**，
+`run.bat` / `run.sh` 都走这个入口。全程不修改 `gcs/` 下任何源码，也不改变 README 第三节的手工运行命令。
+
+**幂等与防覆盖**：`.venv`、`requirements.txt`、`runs/.gitkeep`、`.env`、`run.bat`、`run.sh`
+一律「存在即跳过」；`.env` 已存在时即使选择接入也不改写，只提示手动编辑。
+`--check` 是纯只读预检，不会 clone 或写入任何文件。
+
+**CI 校验**：`test` job 增加 `python -m py_compile install.py` 与 `python install.py --check`，
+覆盖全部 5 个平台 / 版本组合；安装脚本不需要任何 Secret。
+
+**常见坑**
+
+1. Windows runner 的 stdout 是 cp1252，安装脚本的中文日志依赖 `sys.stdout.reconfigure(encoding="utf-8")` + `chcp 65001` 兜底；新增输出时保持同一处理。
+2. 只下载 `install.py` 时脚本会自动 clone；若目标目录已有内容，脚本拒绝覆盖并提示改用 `--dir`，绝不删除用户数据。
+3. clone 出的旧版本仓库可能没有 `install.py`，脚本会自动把自身复制进项目目录，保证 `run.bat` 可用。
+4. 安装校验阶段强制剥离 `GCS_LLM_*` 环境变量，避免误触发真实模型调用；配置只校验「能否被 ModelGateway 读到」，不发起网络请求、不消耗额度。
+5. 生成的 `run.bat` / `run.sh` 不入仓，换机器后重新运行一次安装脚本即可再生成。
+6. Key 只写进被忽略的 `.env`（Unix 下权限 600）；选择「不接入」时连 `.env` 都不创建。
