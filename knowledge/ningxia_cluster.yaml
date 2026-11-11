@@ -1,0 +1,96 @@
+# 领域知识包：宁夏枢纽（中卫—银川）算力资源与电价绿电画像
+# 版本化维护：任何修改都必须升级 version，并在 CHANGELOG 记录变更原因。
+# 数据口径：电价与绿电占比为公开峰谷分时电价的代表性取值，用于演示与评测；
+#           生产接入时替换为电网/园区实时接口，字段结构保持不变。
+version: nx-2026.11
+region: 宁夏枢纽（中卫—银川）
+
+# 分时电价时段划分（0-23 时）
+tariff:
+  valley_hours: [0, 1, 2, 3, 4, 5, 6, 7]
+  flat_hours: [8, 9, 10, 15, 16, 17, 22, 23]
+  peak_hours: [11, 12, 13, 14, 18, 19, 20, 21]
+
+# 24 小时绿电（风光）出力占比，0-1
+# 宁夏以光伏为主：正午出力最高，夜间靠风电维持中等水平，傍晚回落
+# 注意：正午同时是峰电价时段——成本与绿电在这里是真正冲突的，不能靠“都选最好的”蒙混
+green_share_by_hour:
+  [0.62, 0.64, 0.66, 0.66, 0.65, 0.63, 0.60, 0.57,
+   0.60, 0.68, 0.78, 0.86, 0.90, 0.91, 0.89, 0.84,
+   0.76, 0.66, 0.55, 0.48, 0.45, 0.47, 0.52, 0.58]
+
+# 电网排放因子 kgCO2e/kWh（西北区域电网代表值）
+grid_carbon_factor: 0.581
+
+# 资源池：只描述“有哪些卡、放在哪、能效如何”，不含任何调度策略
+pools:
+  - id: ZW-A100
+    city: 中卫
+    gpu: A100-80G
+    gpus: 64
+    pue: 1.15
+    gpu_power_kw: 0.40
+    amort_per_gpu_hour: 2.20     # 整机折旧摊销（元/GPU·h），与电费一起构成单位成本
+    price:
+      valley: 0.28
+      flat: 0.45
+      peak: 0.62
+    note: 天然冷源机房，PUE 最低，适合长时训练
+  - id: ZW-H800
+    city: 中卫
+    gpu: H800
+    gpus: 32
+    pue: 1.18
+    gpu_power_kw: 0.70
+    amort_per_gpu_hour: 4.60
+    price:
+      valley: 0.30
+      flat: 0.47
+      peak: 0.65
+    note: 高算力密度，推理与微调首选
+  - id: YC-A800
+    city: 银川
+    gpu: A800
+    gpus: 48
+    pue: 1.22
+    gpu_power_kw: 0.40
+    amort_per_gpu_hour: 2.00
+    price:
+      valley: 0.31
+      flat: 0.49
+      peak: 0.68
+    note: 距用户侧更近，时延敏感作业优先
+
+# 作业画像：按任务类型的典型资源需求与目标权重（由 Agent 查询，不在代码里硬编码）
+job_profiles:
+  train:
+    gpu_hours: [6, 36]
+    gpus: [8, 32]
+    sla_slack: 1.80
+    budget_per_gpu_hour: 6.5
+    weights: {wait: 0.15, cost: 0.35, green: 0.25, carbon: 0.10, reliability: 0.15}
+  infer:
+    gpu_hours: [0.5, 3]
+    gpus: [1, 4]
+    sla_slack: 1.15
+    budget_per_gpu_hour: 9.0
+    weights: {wait: 0.40, cost: 0.15, green: 0.10, carbon: 0.10, reliability: 0.25}
+  batch:
+    gpu_hours: [2, 12]
+    gpus: [4, 16]
+    sla_slack: 3.00
+    budget_per_gpu_hour: 4.0
+    weights: {wait: 0.10, cost: 0.30, green: 0.35, carbon: 0.15, reliability: 0.10}
+
+# 约束阈值：硬约束违反即判定不合格，不做加权折中
+constraints:
+  max_wait_ratio: 1.0        # 排队时长 / SLA 窗口 的上限
+  max_budget_overrun: 0.15   # 成本容差：超预算 15% 以内视为达标（成本 SLA 的常见约定）
+  min_green_share: 0.40      # 作业期平均绿电占比下限（低于傍晚最低出力即判违规）
+
+# 返工预算：超限即升级人工，禁止无限重试
+rework_budget:
+  max_rounds: 2
+  max_tokens: 600000
+  max_seconds: 900
+  pass_score: 80

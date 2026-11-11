@@ -1,0 +1,16 @@
+# 运行本项目所需的第三方依赖
+# 设计原则：能用标准库就用标准库，保证评委机器上「一条命令跑起来」。
+#
+# 安装（建议装到非系统盘目录，避免占用系统盘）：
+#   python -m venv D:\envs\gcs
+#   D:\envs\gcs\Scripts\pip install -r requirements.txt
+#
+# 强制依赖
+PyYAML>=6.0,<7.0        # 领域知识包解析（唯一的运行时第三方依赖）
+
+# 说明：
+# * 可视化操作台 app/server.py 只用标准库 http.server，不引入 Web 框架；
+# * 看板 console.html 为单文件零依赖 HTML，不引用任何 CDN，离线可看；
+# * 对照实验、模拟器、编排引擎均无第三方依赖；
+# * DeepEval 等评测框架在方案书中作为「设计参照」提及，未进入运行路径，
+#   如需扩展可自行安装（Apache-2.0）。
