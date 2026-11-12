@@ -71,6 +71,7 @@ footer{margin-top:18px;font-size:11px;color:#98A3B3;display:flex;justify-content
 
 
 def _dag_js() -> str:
+    """内联到看板的原生 JS：按层级画 DAG 节点与依赖曲线，返工回路用橙色虚线标出。"""
     return """
 function drawDag(g){
   const host=document.getElementById('dag');
@@ -116,6 +117,10 @@ function drawDag(g){
 
 
 def render_console(art: Artifact, pack_version: str, out: Path) -> Path:
+    """把一次运行渲染成单文件 HTML 看板：KPI、DAG、事件轨迹、rubric、成本明细。
+
+    不引任何 CDN，双击即可打开，答辩现场断网也能演示。
+    """
     data = art.to_dict()
     m = data["metrics"]
     rubric = data["rubric"][-1] if data["rubric"] else {"dims": [], "score": 0, "threshold": 80}
@@ -204,6 +209,7 @@ drawDag(G);
 
 
 def render_markdown(art: Artifact, out: Path) -> Path:
+    """导出纯文本版运行报告：指标、rubric 明细与逐条运行轨迹，便于进 Git 留痕。"""
     d = art.to_dict()
     m = d["metrics"]
     lines = [

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from .agents import ROLE_CARDS, Executor, Profiler, Reporter, Scheduler
 from .dag import Dag, build_default
 from .knowledge import KnowledgePack
-from .llm import BudgetExceeded, ModelGateway
+from .llm import ModelGateway
 from .reflect import Decision, Reflector
 from .simulator import Cluster, Job, JobResult, RunMetrics
 from .verifier import Verifier
@@ -32,11 +32,14 @@ class Policy:
     max_rounds: int = 2
     rule: str | None = None              # None | fcfs | sjf
     with_evidence: bool = True
+    green_scale: float = 1.0             # 绿电/碳排权重倍率，1.0 为知识包原值
+    wait_scale: float = 1.0              # 排队权重倍率，>1 表示更不愿意让作业等
     description: str = ""
 
 
 @dataclass
 class Event:
+    """运行轨迹上的一条事件：序号、状态、节点、所属角色、详情、状态标签。"""
     seq: int
     state: str
     node: str
@@ -45,12 +48,15 @@ class Event:
     status: str = "done"
 
     def as_dict(self) -> dict:
+        """转成看板时间线用的字段集。"""
         return dict(seq=self.seq, state=self.state, node=self.node, agent=self.agent,
                     detail=self.detail, status=self.status)
 
 
 @dataclass
 class Artifact:
+    """一次编排运行的完整产物：调度方案、执行结果、指标、DAG、事件轨迹、rubric 历史、
+    缺陷历史、LLM 记账与复盘叙述。"""
     policy: str
     jobs: list[Job]
     plan: dict[str, dict]
@@ -67,6 +73,7 @@ class Artifact:
     elapsed_s: float = 0.0
 
     def summary(self) -> dict:
+        """压缩成评测看板与机器可读报告需要的最小字段集。"""
         m = self.metrics.as_dict()
         return {
             "policy": self.policy,
@@ -82,6 +89,7 @@ class Artifact:
         }
 
     def to_dict(self) -> dict:
+        """序列化为前端看板与 API 响应需要的完整字典。"""
         return {
             "policy": self.policy,
             "rounds": self.rounds,
@@ -100,8 +108,14 @@ class Artifact:
 
 
 class Orchestrator:
+    """八状态机编排引擎：PARSE→PLAN→SCHEDULE→EXECUTE→VERIFY→REFLECT→REPORT，
+    不通过则定向返工 REWORK，最后 REPORT。"""
+
+
     def __init__(self, pack: KnowledgePack, llm: ModelGateway | None = None,
-                 policy: Policy | None = None, dag: Dag | None = None):
+                 policy: Policy | None = None, dag: Dag | None = None,
+                 reflect_threshold: int | None = None):
+        """绑定知识包与模型网关，按策略开启自省闭环；可显式指定阈值（敏感性分析用）。"""
         self.pack = pack
         self.llm = llm
         self.policy = policy or Policy()
@@ -110,13 +124,14 @@ class Orchestrator:
         self.scheduler = Scheduler(pack, llm)
         self.executor = Executor(pack)
         self.verifier = Verifier(pack, llm)
-        self.reflector = Reflector(pack)
+        self.reflector = Reflector(pack, threshold=reflect_threshold)
         self.reporter = Reporter(llm)
         self.events: list[Event] = []
         self.audit: list[dict] = []
 
     # ------------------------------------------------------------------
     def _emit(self, state: str, node: str, agent: str, detail: str, status: str = "done") -> None:
+        """记一条事件：写入时间线、更新 DAG 节点状态，并留下“谁用了什么工具”的审计记录。"""
         self.events.append(Event(len(self.events) + 1, state, node, agent, detail, status))
         if node in self.dag.nodes:
             self.dag.nodes[node].status = "done" if status == "done" else status
@@ -127,6 +142,10 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def run(self, jobs: list[Job], cluster: Cluster | None = None) -> Artifact:
+        """跑完一整轮编排：解析→画像→排程→执行→校验→评分，不达标则定向返工，最终出报告。
+
+        返回的 Artifact 同时供看板、API 与评测脚本使用，保证三方看到的是同一份数据。
+        """
         started = time.time()
         cluster = cluster or Cluster(self.pack)
         self.dag = build_default()
@@ -203,7 +222,14 @@ class Orchestrator:
             if decision.passed or self.policy.rule:
                 break
             if rnd >= self.policy.max_rounds or not decision.jobs_to_rework:
-                self._emit("REFLECT", "n_reflect", "A6", "返工预算耗尽，升级人工并保留现场", "failed")
+                reason = "轮次预算耗尽" if rnd >= self.policy.max_rounds else "已无可返工作业"
+                nodes = ",".join(decision.target_nodes) or "无"
+                self._emit(
+                    "REFLECT", "n_reflect", "A6",
+                    f"{reason}：已记录人工复核请求（rubric {decision.score}/"
+                    f"{decision.threshold}，归因节点 {nodes}），"
+                    f"现场与轨迹保留，可在操作台 /console/<run_id> 复核",
+                    "failed")
                 break
 
             # ---------------- REWORK：只退责任节点 ----------------
@@ -238,8 +264,30 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     def _weights(self, jobs: list[Job]) -> dict[str, dict] | None:
+        """按策略给出每个作业的目标权重；返回 None 表示直接用知识包原值，不做覆盖。"""
         if self.policy.weights_mode == "knowledge":
-            return None
+            kg, kw = self.policy.green_scale, self.policy.wait_scale
+            if abs(kg - 1.0) < 1e-9 and abs(kw - 1.0) < 1e-9:
+                return None
+            # 敏感性分析用：先整体缩放绿电+碳排权重，再单独缩放排队权重；
+            # 两次缩放都把差额按原比例还给其余分项，保证权重和仍为 1。
+            out = {}
+            for j in jobs:
+                w = dict(self.pack.weights_for(j.type))
+                if abs(kg - 1.0) > 1e-9:
+                    g = w["green"] + w["carbon"]
+                    rest = w["wait"] + w["cost"] + w["reliability"]
+                    if g > 0 and rest > 0:
+                        scale_rest = max(0.0, 1.0 - ((kg - 1.0) * g) / rest)
+                        w["wait"] *= scale_rest
+                        w["cost"] *= scale_rest
+                        w["reliability"] *= scale_rest
+                        w["green"] *= kg
+                        w["carbon"] *= kg
+                if abs(kw - 1.0) > 1e-9:
+                    w = self._scale_one(w, "wait", kw)
+                out[j.id] = w
+            return out
         if self.policy.weights_mode == "uniform":
             w = {"wait": 0.4, "cost": 0.4, "green": 0.0, "carbon": 0.0, "reliability": 0.2}
             return {j.id: w for j in jobs}
@@ -255,7 +303,23 @@ class Orchestrator:
             return out
         return None
 
+    @staticmethod
+    def _scale_one(w: dict, key: str, k: float) -> dict:
+        """把单个权重乘以 k，差额按比例摊到其余分项上，保持权重和为 1。
+
+        用于“如果更在意排队会怎样”这类反事实扫描：只改偏好，不改任何约束。
+        """
+        rest = sum(v for kk, v in w.items() if kk != key)
+        if w.get(key, 0.0) <= 0 or rest <= 0:
+            return w
+        scale = max(0.0, 1.0 - ((k - 1.0) * w[key]) / rest)
+        out = {kk: v * scale for kk, v in w.items()}
+        out[key] = w[key] * k
+        return out
+
     def _rule_plan(self, jobs, estimates, cluster) -> dict[str, dict]:
+        """按“最早完成 / 最早排队”规则生成备选排程方案，不走多目标求解。"""
+        est = {e["job_id"]: e for e in estimates}
         est = {e["job_id"]: e for e in estimates}
         if self.policy.rule == "fcfs":
             ordered = sorted(jobs, key=lambda j: j.arrive_min)
@@ -281,6 +345,8 @@ class Orchestrator:
         return plan
 
     def profiler_learn_safe(self, results: list[JobResult], jobs: list[Job]) -> None:
+        """报告阶段的经验回写；失败不影响已产出的结果，避免“复盘异常拖垮整轮”。
+        """
         try:
             self.profiler.learn(results, jobs)
         except Exception:

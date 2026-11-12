@@ -41,17 +41,22 @@ NODE_OF_CODE = {
 
 @dataclass
 class Dimension:
+    """rubric 的一个评分维度：名称、权重、是否通过、未通过时的说明。"""
+
     name: str
     weight: int
     passed: bool
     reason: str
 
     def as_dict(self) -> dict:
+        """转成看板 rubric 条形图需要的字段。"""
         return dict(name=self.name, weight=self.weight, passed=self.passed, reason=self.reason)
 
 
 @dataclass
 class Decision:
+    """一轮自省评分的结果：总分、是否过阈值，以及未通过时的返工指令与目标节点。"""
+
     score: int
     passed: bool
     threshold: int
@@ -63,6 +68,7 @@ class Decision:
     command: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
+        """转成看板与 API 需要的完整评分记录，保留归因与返工指令以便事后追溯。"""
         return dict(score=self.score, passed=self.passed, threshold=self.threshold,
                     dims=[d.as_dict() for d in self.dims], directives=self.directives,
                     jobs_to_rework=self.jobs_to_rework, target_nodes=self.target_nodes,
@@ -70,12 +76,17 @@ class Decision:
 
 
 class Reflector:
-    def __init__(self, pack: KnowledgePack):
+    """rubric 评分与定向返工：把缺陷归因到责任节点，只重跑该子树，其余节点复用结果。"""
+
+    def __init__(self, pack: KnowledgePack, threshold: int | None = None):
+        """阈值默认取知识包的 pass_score；显式传入用于敏感性分析（同一份数据扫 60/70/80/90/95）。"""
         self.pack = pack
-        self.threshold = int(pack.rework_budget["pass_score"])
+        self.threshold = int(threshold if threshold is not None
+                             else pack.rework_budget["pass_score"])
 
     def score(self, report: VerifyReport, metrics: RunMetrics, jobs: list[Job],
               estimates: list[dict], round_index: int) -> Decision:
+        """按六维 rubric 打分；未达阈值时把阻塞缺陷归因到责任节点并生成定向返工指令。"""
         blocking = report.blocking
         by_layer: dict[str, list[Defect]] = {}
         for d in blocking:
@@ -146,5 +157,8 @@ class Reflector:
 
     @staticmethod
     def _cost_ratio(metrics: RunMetrics) -> float:
-        # 以 6.0 元/GPU·h 作为参考线，仅用于“成本效率”这一非阻塞维度
+        """单位成本相对 6.0 元/GPU·h 参考线的倍率，只用于「成本效率」这一非阻塞维度。
+
+        只提示不阻塞：成本高说明可优化，但不代表方案不可用，不该因此触发返工。
+        """
         return metrics.cost_per_gpu_hour / 6.0 if metrics.cost_per_gpu_hour else 0.0

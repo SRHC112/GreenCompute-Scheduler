@@ -17,6 +17,7 @@ from .simulator import HORIZON_MIN, Cluster, Job, JobResult, RunMetrics, execute
 
 @dataclass(frozen=True)
 class RoleCard:
+    """一张角色卡：定义某个 Agent 的身份、职责、可用工具与失败时的出口策略。"""
     id: str
     name: str
     duty: str
@@ -63,10 +64,16 @@ class Profiler:
     """把“知识包里的画像”翻译成“这批作业要跑多久”。"""
 
     def __init__(self, pack: KnowledgePack):
+        """构造画像估计器：绑定知识包，维护按作业类型积累的历史时长比例。"""
         self.pack = pack
         self.history: dict[str, list[float]] = {}
 
     def estimate(self, jobs: list[Job], method: str = "profile_mean") -> list[dict]:
+        """把知识包里的画像（gpu_hours 区间）翻译为每个作业的估计时长、置信度与出处。
+
+        置信度与画像的离散度成反比；历史数据若存在则按实际/估计比率做校准。
+        每条估计都带证据来源，供 A5 验证器追溯口径。
+        """
         out = []
         for job in jobs:
             prof = self.pack.job_profiles[job.type]
@@ -105,6 +112,7 @@ class Scheduler:
     """显式目标函数寻优：在候选（池, 起始时刻）上取 J 最小者。"""
 
     def __init__(self, pack: KnowledgePack, llm: ModelGateway | None = None):
+        """构造调度器：绑定知识包，可选注入模型网关（用于生成决策叙述，不产出数字）。"""
         self.pack = pack
         self.llm = llm
 
@@ -112,6 +120,11 @@ class Scheduler:
              weights_override: dict[str, dict] | None = None,
              only: set[str] | None = None,
              candidate_mode: str = "full") -> dict[str, dict]:
+        """按优先级与截止时间逐作业寻最优（池, 起始时刻），返回作业 → 调度方案的映射。
+
+        约束越紧的作业先排（推理类优先），避免被长作业挤掉；
+        先做硬约束过滤（完成时刻不越过截止时间），再按目标函数打分。
+        """
         est = {e["job_id"]: e for e in estimates}
         plan: dict[str, dict] = {}
         targets = [j for j in jobs if (only is None or j.id in only)]
@@ -129,6 +142,11 @@ class Scheduler:
 
     def _best(self, job: Job, duration: int, cluster: Cluster, w: dict,
               candidate_mode: str = "full") -> dict | None:
+        """在候选（池, 起始时刻）上按目标函数打分并选最优者。
+
+        硬约束优先：若存在“不迟到”的候选，只在其中选；否则退化为“最早完成”。返回的候选
+        带 `feasible`、`alternatives`（取前 4 名）与 `rationale`（L5 Judge 可解析的依据）。
+        """
         best, scored = None, []
         feasible: list[dict] = []
         for start in self._candidate_starts(job, duration, cluster, candidate_mode):
@@ -160,6 +178,7 @@ class Scheduler:
 
     def _candidate_starts(self, job: Job, duration: int, cluster: Cluster,
                           mode: str = "full") -> list[int]:
+        """生成候选启动时刻：通用模式只取各池最早可排点，完整模式再加谷段/峰段边界锚点。"""
         starts: set[int] = set()
         for pool in self.pack.pools:
             s = cluster.earliest_start(pool.id, job.arrive_min, duration, job.gpus)
@@ -180,6 +199,7 @@ class Scheduler:
 
     def _score(self, job: Job, duration: int, pool_id: str, start: int,
                cluster: Cluster, w: dict) -> dict:
+        """对单个（池, 起始时刻）候选计算加权目标值与各分项，供择优与取舍说明使用。"""
         pool = self.pack.pool(pool_id)
         energy = job.gpus * pool.gpu_power_kw * pool.pue * duration / 60
         price, segment = self.pack.price_at(pool_id, start)
@@ -204,6 +224,7 @@ class Scheduler:
 
     @staticmethod
     def _congestion(cluster: Cluster, pool_id: str, start: int, duration: int) -> float:
+        """目标时间窗内的占用率（0~1），作为“可靠性”分项，避免都往同一个空池挤。"""
         cap = cluster.pack.pool(pool_id).gpus
         used = sum(g for s, e, g, _ in cluster.alloc[pool_id]
                    if s < start + duration and e > start)
@@ -211,6 +232,10 @@ class Scheduler:
 
     @staticmethod
     def _rationale(job: Job, best: dict, scored: list[dict]) -> dict:
+        """生成“因何排除、因何选定”的对照说明，是 L5 语义校验与事后复核的输入。
+
+        只写可复核的事实（谁更便宜、差多少钱、绿电差几个百分点），不做主观判断。
+        """
         cheaper = [c for c in scored if c["cost_est"] < best["cost_est"]]
         greener = [c for c in scored if c["green_share"] > best["green_share"]]
         return {
@@ -229,12 +254,20 @@ class Scheduler:
 
 # ---------------------------------------------------------------- A4 Executor
 class Executor:
+    """把方案提交到模拟集群并回收真实结果；只上报异常，不做通过与否的判定。"""
+
     def __init__(self, pack: KnowledgePack):
+        """构造执行器：绑定知识包，维护本次运行的重试计数。"""
         self.pack = pack
         self.retries = 0
 
     def run(self, jobs: list[Job], plan: dict[str, dict], cluster: Cluster
             ) -> tuple[list[JobResult], RunMetrics]:
+        """把调度方案落地到集群执行，返回逐作业结果与汇总指标。
+
+        执行侧只做“发现异常”，不做判定（判定权在 A5 Verifier），避免“自证其清”。
+        重试计数 = 未达 SLA 的作业数。
+        """
         results, metrics = execute(self.pack, cluster, jobs, plan)
         # 执行侧只做“发现异常”，不做判定：判定权在 A5，避免自证
         self.retries = sum(1 for r in results if not r.sla_ok)
@@ -243,10 +276,14 @@ class Executor:
 
 # ---------------------------------------------------------------- A7 Reporter
 class Reporter:
+    """把运行指标与缺陷叙述成不超过 120 字的复盘文本，只描述事实，不编造数字。"""
+
     def __init__(self, llm: ModelGateway | None = None):
+        """可选绑定模型网关：在线时由模型润色叙述，离线时走确定性模板。"""
         self.llm = llm
 
     def narrative(self, metrics: RunMetrics, defects: list[dict], rounds: int) -> str:
+        """生成本批次调度结果的结构化叙述；离线时走确定性模板，在线时让模型润色但不捏造指标。"""
         deterministic = (f"本批次 {metrics.jobs} 个作业，SLA 达成 {metrics.sla_rate:.1%}，"
                          f"预算达标 {metrics.budget_rate:.1%}，"
                          f"单位算力成本 ¥{metrics.cost_per_gpu_hour:.2f}/GPU·h，"

@@ -23,6 +23,12 @@ STEP_MIN = 15
 
 @dataclass
 class Job:
+    """一个待调度作业：估算时长与真实时长分离，Agent 只能看到估算值。
+
+    duration_actual 是模拟器的真值，返工过程无法修改它——否则“自我纠错”
+    就变成了“改考核标准”，实验结论不再可信。
+    """
+
     id: str
     type: str
     gpus: int
@@ -35,11 +41,14 @@ class Job:
 
     @property
     def gpu_hours(self) -> float:
+        """按真实时长折算的 GPU 小时数，是单位成本与绿电占比的分母。"""
         return self.gpus * self.duration_actual / 60.0
 
 
 @dataclass
 class JobResult:
+    """一个作业的真实执行结果：时间窗、成本拆项、能耗与绿电占比、三项约束判定。"""
+
     job_id: str
     type: str
     pool_id: str
@@ -59,9 +68,11 @@ class JobResult:
 
     @property
     def ok(self) -> bool:
+        """三项硬约束（SLA / 预算 / 绿电）是否同时满足。"""
         return self.sla_ok and self.budget_ok and self.green_ok
 
     def as_dict(self) -> dict:
+        """转成可 JSON 序列化的字典，浮点数统一保留 4 位小数，避免看板出现长尾小数。"""
         d = dict(self.__dict__)
         for k in ("cost", "power_cost", "amort_cost", "energy_kwh", "green_share", "carbon_kg"):
             d[k] = round(d[k], 4)
@@ -70,6 +81,8 @@ class JobResult:
 
 @dataclass
 class RunMetrics:
+    """一次运行汇总到集群级别的指标，是评测对比与看板展示的唯一数据源。"""
+
     jobs: int = 0
     sla_rate: float = 0.0
     budget_rate: float = 0.0
@@ -85,6 +98,7 @@ class RunMetrics:
     utilization: float = 0.0
 
     def as_dict(self) -> dict:
+        """转字典并统一收敛小数位，保证不同运行之间的看板数值可直接对比。"""
         return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in self.__dict__.items()}
 
 
@@ -92,10 +106,12 @@ class Cluster:
     """资源池占用表。以 (start, end, gpus) 区间记录，支持回滚与定向重排。"""
 
     def __init__(self, pack: KnowledgePack):
+        """按知识包里的资源池初始化占用表，每个池一条 (start, end, gpus, job_id) 记录链。"""
         self.pack = pack
         self.alloc: dict[str, list[tuple[int, int, int, str]]] = {p.id: [] for p in pack.pools}
 
     def fits(self, pool_id: str, start: int, duration: int, gpus: int) -> bool:
+        """判断某个时间窗内该池剩余卡数是否够用：切分端点后逐段检查峰值占用。"""
         cap = self.pack.pool(pool_id).gpus
         end = start + duration
         if start < 0 or end > HORIZON_MIN:
@@ -111,6 +127,7 @@ class Cluster:
         return True
 
     def place(self, pool_id: str, start: int, duration: int, gpus: int, job_id: str) -> None:
+        """把一段占用写进池子；调用前必须先用 fits 校验容量。"""
         self.alloc[pool_id].append((start, start + duration, gpus, job_id))
 
     def relocate_free(self, job_ids: set[str]) -> None:
@@ -119,6 +136,7 @@ class Cluster:
             self.alloc[pool_id] = [x for x in items if x[3] not in job_ids]
 
     def earliest_start(self, pool_id: str, not_before: int, duration: int, gpus: int) -> int | None:
+        """从 not_before 起按 STEP_MIN 步进，返回该池最早的可行启动时刻；排不下返回 None。"""
         t = max(0, not_before)
         while t + duration <= HORIZON_MIN:
             if self.fits(pool_id, t, duration, gpus):
@@ -127,6 +145,7 @@ class Cluster:
         return None
 
     def utilization(self) -> float:
+        """整个排程窗口内的平均卡时利用率，用来判断是不是靠“空转”换来的低成本。"""
         total_cap = sum(p.gpus for p in self.pack.pools) * HORIZON_MIN
         used = sum((e - s) * g for items in self.alloc.values() for s, e, g, _ in items)
         return used / total_cap if total_cap else 0.0
@@ -134,7 +153,12 @@ class Cluster:
 
 def make_jobs(pack: KnowledgePack, n: int = 40, seed: int = 20261111,
               fault_ratio: float = 0.2) -> list[Job]:
-    """按知识包的作业画像生成作业流。fault_ratio 控制在真实运行中会超时的比例。"""
+    """按知识包的作业画像生成 n 个作业流：时长根据 GPU 小时反推，预算随之推导。
+
+    fault_ratio 控制在真实运行中会超时（实际延长）的作业比例；超时真值由
+    (seed, 作业序号) 决定，与调度决策无关，保证返工无法“改真值”。
+    """
+    rng = random.Random(seed)
     rng = random.Random(seed)
     types = list(pack.job_profiles)
     jobs: list[Job] = []
@@ -207,6 +231,7 @@ def execute(pack: KnowledgePack, cluster: Cluster, jobs: list[Job],
 
 
 def aggregate(results: list[JobResult], cluster: Cluster, jobs: list[Job]) -> RunMetrics:
+    """把逐作业结果汇总成运行级指标：达成率、等待分位、单位成本、绿电窗口占比、碳排。"""
     n = len(results)
     if not n:
         return RunMetrics()

@@ -19,6 +19,7 @@ SEGMENTS = ("valley", "flat", "peak")
 
 @dataclass(frozen=True)
 class Pool:
+    """一个算力资源池：池 ID、所在城市、GPU 型号、卡数、PUE、单卡功率、分摊摊销价、分时电价。"""
     id: str
     city: str
     gpu: str
@@ -30,12 +31,14 @@ class Pool:
     note: str = ""
 
     def price_at(self, hour: int, tariff: dict[str, Any]) -> tuple[float, str]:
+        """按小时取分时电价（谷/平/峰）并返回（单价，时段名）。"""
         segment = segment_of(hour, tariff)
         return self.price[segment], segment
 
 
 @dataclass(frozen=True)
 class JobProfile:
+    """作业画像：名称、GPU 耗时区间、GPU 卡数区间、SLA 余量、每卡每小时预算、各维度权重。"""
     name: str
     gpu_hours: tuple[float, float]
     gpus: tuple[int, int]
@@ -44,11 +47,15 @@ class JobProfile:
     weights: dict[str, float]
 
     def weight_sum(self) -> float:
+        """各维度权重之和，应约为 1.0。"""
         return round(sum(self.weights.values()), 6)
 
 
 @dataclass
 class KnowledgePack:
+    """领域知识包的顶层容器：版本号、分时电价、每小时绿电占比、网格碳因子、
+    资源池列表、作业画像、硬约束与返工预算。"""
+
     version: str
     region: str
     tariff: dict[str, Any]
@@ -63,27 +70,32 @@ class KnowledgePack:
 
     # ---------- 查询接口 ----------
     def pool(self, pool_id: str) -> Pool:
+        """按 ID 取资源池，不存在抛 KeyError。"""
         for p in self.pools:
             if p.id == pool_id:
                 return p
         raise KeyError(f"知识包中不存在资源池 {pool_id}")
 
     def green_at(self, minute: int) -> float:
+        """按分钟取该时段的绿电占比（24 个分时值循环使用）。"""
         return self.green_share_by_hour[(minute // 60) % 24]
 
     def price_at(self, pool_id: str, minute: int) -> tuple[float, str]:
+        """按资源池与分钟取分时电价：返回（单价，时段名）。"""
         return self.pool(pool_id).price_at((minute // 60) % 24, self.tariff)
 
     def weights_for(self, job_type: str) -> dict[str, float]:
+        """按作业类型取目标函数权重副本（wait/cost/green/carbon/reliability，和为 1）。"""
         return dict(self.job_profiles[job_type].weights)
 
     def fingerprint(self) -> str:
-        """知识包指纹：对照实验里用来证明“三组用的是同一份知识”"""
+        """知识包指纹：对照实验用来证明“各组用的是同一份知识包”。"""
         return f"{self.version}/{len(self.pools)}pools/{len(self.job_profiles)}profiles"
 
     # ---------- 加载与校验 ----------
     @classmethod
     def load(cls, path: str | Path) -> "KnowledgePack":
+        """从 YAML 加载知识包并做结构校验；校验失败抛 ValueError，不允许带病运行。"""
         path = Path(path)
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         pack = cls(
@@ -126,6 +138,8 @@ class KnowledgePack:
         return pack
 
     def validate(self) -> None:
+        """结构校验：24 小时绿电占比、资源池非空且 id 不重复、电价覆盖峰平谷、
+        各作业类型权重之和为 1、分时电价覆盖 0-23 时且不重叠。失败抛 ValueError。"""
         errors: list[str] = []
         if len(self.green_share_by_hour) != 24:
             errors.append("green_share_by_hour 必须为 24 个点")
@@ -154,6 +168,7 @@ class KnowledgePack:
 
 
 def segment_of(hour: int, tariff: dict[str, Any]) -> str:
+    """把小时映射到谷/平/峰三个时段之一（hour 可超过 23，自动取模）。"""
     hour %= 24
     if hour in tariff["valley_hours"]:
         return "valley"

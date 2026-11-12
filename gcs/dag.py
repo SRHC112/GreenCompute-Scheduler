@@ -19,6 +19,8 @@ NODE_STATUS = ("pending", "running", "done", "failed", "skipped")
 
 @dataclass
 class Node:
+    """DAG 的一个节点：标识、标签、负责角色、类型（TASK/DECISION/CHECK/HUMAN）、
+    前置依赖、是否为返工环（loop）、运行状态与明细。"""
     id: str
     label: str
     agent: str
@@ -29,16 +31,22 @@ class Node:
     detail: str = ""
 
     def as_dict(self) -> dict:
+        """转成前端画 DAG 所需的字段集（依赖、是否返工环、运行状态）。"""
         return dict(id=self.id, label=self.label, agent=self.agent, type=self.type,
                     deps=self.deps, loop=self.loop, status=self.status, detail=self.detail)
 
 
 class Dag:
+    """有向无环图：节点字典 + 插入顺序。循环边（loop）不参与拓扑层级计算，仅在运行时按
+    “定向返工”激活。"""
+
     def __init__(self) -> None:
+        """空图；节点按插入顺序记录，保证渲染结果稳定可复现。"""
         self.nodes: dict[str, Node] = {}
         self.order: list[str] = []
 
     def add(self, node: Node) -> Node:
+        """加入节点并校验：类型必须合法，前置依赖必须已存在。"""
         if node.type not in NODE_TYPES:
             raise ValueError(f"非法节点类型 {node.type}")
         for dep in node.deps:
@@ -49,6 +57,7 @@ class Dag:
         return node
 
     def forward_deps(self, node_id: str) -> list[str]:
+        """该节点的非循环前置依赖（排除标记为 loop 的返工边）。"""
         return [n for n in self.nodes[node_id].deps if not self.nodes[n].loop]
 
     def levels(self) -> list[list[str]]:
@@ -56,6 +65,7 @@ class Dag:
         level: dict[str, int] = {}
 
         def depth(nid: str, seen: tuple[str, ...] = ()) -> int:
+            """递归求节点层级；seen 用于检测环，出现回边直接报错而不是死循环。"""
             if nid in level:
                 return level[nid]
             if nid in seen:
@@ -73,6 +83,7 @@ class Dag:
         return [groups[k] for k in sorted(groups)]
 
     def downstream(self, node_id: str) -> set[str]:
+        """所有直接或间接依赖于该节点的下游节点集合（不含本身）。"""
         out, frontier = set(), [node_id]
         while frontier:
             cur = frontier.pop()
@@ -83,6 +94,7 @@ class Dag:
         return out
 
     def to_dict(self) -> dict:
+        """序列化为前端可直接消费的字典：nodes + levels（并行层级）。"""
         return {
             "nodes": [n.as_dict() for n in self.nodes.values()],
             "levels": self.levels(),
@@ -90,7 +102,8 @@ class Dag:
 
 
 def build_default() -> Dag:
-    """默认编排图：一次调度任务的完整生命周期。"""
+    """构造默认编排图：一次调度任务的完整生命周期（PARSE→PLAN→SCHEDULE→EXECUTE→VERIFY→REFLECT，
+    不通过则定向返工 REWORK，最后 REPORT）。"""
     g = Dag()
     g.add(Node("n_parse", "任务解析", "A1", "TASK", []))
     g.add(Node("n_profile", "资源画像与时长估计", "A2", "TASK", ["n_parse"]))

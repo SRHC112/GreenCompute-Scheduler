@@ -331,6 +331,35 @@ def load_dotenv(path: Path, env: dict) -> None:
             env[key] = value
 
 
+def harden_env_permissions(path: Path) -> None:
+    """收紧 .env 的访问权限。
+
+    Unix 用 chmod 600；Windows 上 os.chmod 只影响只读位、不产生 ACL 收紧，
+    因此改调 icacls 去掉继承并只授权当前用户。失败不阻断安装（受限账户/组策略
+    可能拒绝），但必须给出可见告警，避免用户误以为文件已被保护。
+    """
+    if os.name == "nt":
+        user = os.environ.get("USERNAME") or ""
+        if not user:
+            warn(".env 权限未收紧：无法确定当前用户名，请手动检查文件 ACL。")
+            return
+        try:
+            proc = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception as exc:
+            warn(f".env 权限未收紧（icacls 调用失败：{type(exc).__name__}），请手动检查 ACL。")
+            return
+        if proc.returncode != 0:
+            warn(".env 权限未收紧（icacls 返回非 0），请手动检查 ACL。")
+        return
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        warn(".env 权限未收紧（chmod 失败），请手动检查文件权限。")
+
+
 def prompt(text: str, default: str = "") -> str:
     if not sys.stdin.isatty():  # 非交互环境（CI / 管道）直接用默认值
         return default
@@ -365,9 +394,14 @@ def collect_llm_config() -> dict:
     base = prompt(f"    接口地址 [{base_d}]：", base_d)
     model = prompt(f"    模型名称 [{model_d}]：", model_d)
     if key_d:
-        masked = key_d[:4] + "***" + key_d[-4:] if len(key_d) > 8 else "***"
-        print(f"    检测到环境变量中的 Key：{masked}")
-        key = prompt("    回车沿用，或输入新 Key：", key_d)
+        print("    检测到环境变量中的 Key（出于安全不回显任何字符）")
+        if sys.stdin.isatty():
+            try:
+                key = getpass.getpass("    回车沿用现有 Key，或输入新 Key（不回显）：").strip() or key_d
+            except Exception:
+                key = key_d
+        else:
+            key = key_d
     elif not sys.stdin.isatty():
         raise InstallError(
             "非交互环境下缺少 API Key",
@@ -376,11 +410,18 @@ def collect_llm_config() -> dict:
     else:
         try:
             key = getpass.getpass("    API Key（输入不回显）：").strip()
-        except Exception:
-            key = prompt("    API Key：")
+        except Exception as exc:
+            raise InstallError(
+                "无法安全读取 API Key",
+                f"当前终端不支持隐藏输入（{type(exc).__name__}）；"
+                "请设置环境变量 GCS_LLM_API_KEY 后重试，避免 Key 明文回显。",
+            ) from exc
 
-    if not re.match(r"^https?://[^\s]+$", base):
-        raise InstallError("接口地址格式不正确", f"应为 http(s):// 开头的完整地址，当前：{base!r}")
+    if not re.match(r"^https://[^\s]+$", base):
+        raise InstallError(
+            "接口地址必须是 HTTPS",
+            f"只允许 https:// 开头的地址，避免 API Key 以明文在网络上传输；当前：{base!r}",
+        )
     if not key:
         raise InstallError("API Key 不能为空", "请重新运行脚本并填写，或选择不接入大模型。")
     if not model:
@@ -446,10 +487,7 @@ def configure_llm(root: Path, py: Path, args) -> str:
             ENV_HEADER + "".join(f"{k}={cfg[k]}\n" for k in LLM_KEYS),
             encoding="utf-8",
         )
-        try:
-            os.chmod(env_path, 0o600)  # 仅 Unix 生效；Windows 忽略失败
-        except OSError:
-            pass
+        harden_env_permissions(env_path)
     except OSError as exc:
         raise InstallError(f"写入 .env 失败：{exc}", "请确认目录可写后重试。") from exc
 

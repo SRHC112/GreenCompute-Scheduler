@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import threading
 import webbrowser
@@ -44,8 +45,18 @@ RUNS_DIR = ROOT / "runs"
 _STORE: dict[str, dict] = {}
 _LOCK = threading.Lock()
 
+# 运行编号白名单：只允许 run_YYYYmmdd_HHMMSS_<策略键> 的形式。
+# 这既是入参校验，也顺手堵掉了 /console/../../x 这类路径穿越。
+RUN_ID_RE = re.compile(r"^run_\d{8}_\d{6}_[A-Za-z0-9_-]+$")
+
+
+def safe_run_id(rid: str) -> str | None:
+    """合法则原样返回，非法返回 None（调用方按 400 处理）。"""
+    return rid if RUN_ID_RE.match(rid) else None
+
 
 def run_once(jobs_n: int, seed: int, policy_key: str) -> dict:
+    """一键生一个可回放运行：先跑通编排，再渲染单文件看板并落入内存缓存。"""
     jobs = make_jobs(PACK, n=jobs_n, seed=seed)
     llm = ModelGateway(token_budget=int(PACK.rework_budget["max_tokens"]))
     art = Orchestrator(PACK, llm=llm, policy=POLICIES[policy_key]).run(jobs)
@@ -82,6 +93,7 @@ def run_once(jobs_n: int, seed: int, policy_key: str) -> dict:
 
 
 def eval_board() -> dict:
+    """拿到对照实验汇总（若未跑过则返回 available=False + 提示），交给前端做评测看板。"""
     p = ROOT / "evaluation" / "summary.json"
     if not p.exists():
         return {"available": False, "message": "尚未运行对照实验，请先执行 python evaluation/run_eval.py"}
@@ -292,23 +304,43 @@ if(QS.get('autorun')==='1'){
 
 
 class Handler(BaseHTTPRequestHandler):
+    """HTTP 服务端：前端页面、运行 API、看板静态文件全部走这里。
+
+    只允许 run_YYYYmmdd_HHMMSS_<策略键> 这种格式的运行编号穿过，保护
+    磁盘路径不被 ../ 之类写入的路径穿越攻击。
+    """
+
     server_version = "GreenCompute/1.0"
 
-    def log_message(self, fmt, *args):  # 静默访问日志，避免刷屏
+    def log_message(self, fmt, *args):
+        """覆盖默认实现以静默访问日志：本地演示时避免每帧请求刷满控制台。"""
         pass
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
+        """回复客户端：先发状态行与头，再发正文，确保 Content-Length 准确。
+
+        注意：状态行/响应头只能发送一次，重复发送会让 Content-Length 与实际
+        字节数错位，客户端解析必然出错。
+        """
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, obj, code: int = 200) -> None:
+        """以 UTF-8 JSON 回复；中文不转义，便于直接读接口。"""
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
                    "application/json; charset=utf-8")
 
     def do_GET(self) -> None:  # noqa: N802
+        """GET 路由：首页、策略列表、评测看板、单次运行结果与看板文件。
+
+        所有带运行编号的路由都先过 safe_run_id，非法编号直接 400，
+        不合法就根本拼不出路径，这是路径穿越的防线。
+        """
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             self._send(200, PAGE.replace("{ver}", PACK.version).encode("utf-8"),
@@ -319,7 +351,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/eval":
             self._json(eval_board())
         elif path.startswith("/api/run/"):
-            rid = path.rsplit("/", 1)[-1]
+            rid = safe_run_id(path.rsplit("/", 1)[-1])
+            if rid is None:
+                self._json({"error": "运行编号格式不合法"}, 400)
+                return
             with _LOCK:
                 data = _STORE.get(rid)
             if not data:
@@ -327,7 +362,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(data)
         elif path.startswith("/console/"):
-            rid = path.rsplit("/", 1)[-1]
+            rid = safe_run_id(path.rsplit("/", 1)[-1])
+            if rid is None:
+                self._json({"error": "运行编号格式不合法"}, 400)
+                return
             f = RUNS_DIR / rid / "console.html"
             if not f.exists():
                 self._json({"error": "未找到该次运行的看板"}, 404)
@@ -337,6 +375,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "未找到的路径"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
+        """POST /api/run：校验作业数（5~300）、种子与策略组后跑一次，返回结果 JSON。"""
         if self.path.split("?")[0] != "/api/run":
             self._json({"error": "未找到的路径"}, 404)
             return
@@ -354,6 +393,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    """命令行入口：解析 --host/--port/--open，启动线程化 HTTP 服务，Ctrl+C 退出。"""
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:

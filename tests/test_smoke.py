@@ -23,7 +23,7 @@ PACK = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
 
 class TestKnowledge(unittest.TestCase):
     def test_pack_loads_and_validates(self):
-        self.assertEqual(PACK.version, "nx-2026.11")
+        self.assertEqual(PACK.version, "nx-2026.12")
         self.assertEqual(len(PACK.green_share_by_hour), 24)
         self.assertEqual(len(PACK.pools), 3)
 

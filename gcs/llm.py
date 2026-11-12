@@ -3,7 +3,7 @@
 约定（很重要，决定了“可复现”能不能成立）：
 - **所有数字由确定性模块计算**，模型只负责“归因叙述”和语义层 Judge；
 - 模型不可用时整个流程仍能跑完，评测得分数值不变，只有叙述文本变化；
-- 每次调用都记账（token、耗时），超过预算由编排器熔断。
+- 每次调用都记账（token、耗时），超过预算由网关自身降级回离线模板，流程不中断。
 
 环境变量：
     GCS_LLM_BASE_URL   例如 https://api.deepseek.com/v1
@@ -21,15 +21,38 @@ import urllib.request
 
 
 class BudgetExceeded(RuntimeError):
-    pass
+    """模型调用预算耗尽：由 `_check_budget` 抛出，`chat` 捕获后降级回离线模拟。"""
+
+
+def _env_int(name: str, default: int) -> int:
+    """读取整型环境变量；缺失或非法时回退默认值，避免启动即崩。"""
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
 
 
 class ModelGateway:
+    """模型网关：统一走国产模型的 OpenAI 兼容接口，离线时退化为确定性模板。
+
+    约定（决定了“可复现”能不能成立）：
+    - 所有数字由确定性模块计算，模型只负责归因叙述与语义层 Judge；
+    - 模型不可用时整个流程仍能跑完，评测得分数值不变，只有叙述文本变化；
+    - 每次调用都记账（token、耗时），超过预算由编排器熔断。
+    """
+
     def __init__(self, token_budget: int = 600_000, model: str | None = None):
+        """读取 GCS_LLM_BASE_URL / GCS_LLM_API_KEY / GCS_LLM_MODEL 三个环境变量；
+        URL 与 key 同时非空才判定为在线，否则进入 offline-mock。
+        GCS_LLM_TOKEN_BUDGET 可覆盖默认预算（缺省 600,000）。"""
         self.base_url = os.getenv("GCS_LLM_BASE_URL", "").rstrip("/")
         self.api_key = os.getenv("GCS_LLM_API_KEY", "")
         self.model = model or os.getenv("GCS_LLM_MODEL", "deepseek-chat")
-        self.token_budget = token_budget
+        self.token_budget = _env_int("GCS_LLM_TOKEN_BUDGET", token_budget)
         self.tokens_in = 0
         self.tokens_out = 0
         self.calls = 0
@@ -39,8 +62,18 @@ class ModelGateway:
 
     # ------------------------------------------------------------------
     def chat(self, system: str, user: str, temperature: float = 0.2) -> str:
-        self._check_budget()
-        if self.online:
+        """发送一轮对话：先检查预算（超限即降级回离线模板，不中断流程），
+        在线则请求模型（失败则降级），否则走确定性模板；每次调用都记账 token。"""
+        try:
+            self._check_budget()
+            exhausted = False
+        except BudgetExceeded:
+            exhausted = True
+            self.mode = "degraded(BudgetExceeded)"
+
+        if exhausted:
+            text = self._mock(system, user)
+        elif self.online:
             try:
                 text = self._request(system, user, temperature)
             except Exception as exc:  # 网络/额度异常一律降级，不让演示挂掉
@@ -54,6 +87,8 @@ class ModelGateway:
         return text
 
     def _request(self, system: str, user: str, temperature: float) -> str:
+        """真实请求（在线）：OpenAI 兼容 /chat/completions，限流退避 0.5s/1.5s/3s，
+        三次均失败则抛异常供上层降级。"""
         payload = json.dumps({
             "model": self.model,
             "messages": [{"role": "system", "content": system},
@@ -79,13 +114,8 @@ class ModelGateway:
         raise last_error or RuntimeError("模型调用失败")
 
     def _mock(self, system: str, user: str) -> str:
-        """离线确定性模板。
-
-        注意两点：
-        1. 叙述类请求（报告撰写）直接把已算好的事实复述成一句话，不编造任何数字；
-        2. 判定类请求（语义 Judge）必须返回 PASS / FAIL 供上层解析，
-           否则 L5 判定会失效——这是离线退化时最容易踩的坑。
-        """
+        """离线确定性模板：叙述类请求复述已算好的事实，不编造数字；判定类（Judge）
+        依据“结论与依据是否自洽”返回 PASS / FAIL，保证 L5 在离线时仍可解析。"""
         first = user.strip().splitlines()[0] if user.strip() else ""
         if "PASS" in system or "FAIL" in system:
             # 语义 Judge：离线时依据“结论与依据是否自洽”做规则判定
@@ -96,12 +126,15 @@ class ModelGateway:
         return f"[离线模式] 已按知识包与硬约束完成「{first[:40]}」，结论由确定性模块给出，本段为模板叙述。"
 
     def _check_budget(self) -> None:
+        """预算检查：累计 token 达到预算则抛出 BudgetExceeded；`chat` 会捕获并降级回离线模拟。"""
         if self.tokens_in + self.tokens_out >= self.token_budget:
             raise BudgetExceeded(
                 f"token 预算耗尽：{self.tokens_in + self.tokens_out}/{self.token_budget}")
 
     # ------------------------------------------------------------------
     def stats(self) -> dict:
+        """返回计账快照：mode / model / calls / tokens_in / tokens_out / tokens_total /
+        latency_ms / budget。"""
         return {
             "mode": self.mode,
             "model": self.model,

@@ -33,6 +33,7 @@ POLICIES = {
 
 
 def main(argv: list[str] | None = None) -> int:
+    """端到端演示入口：生成作业流 → 多智能体编排 → 校验返工 → 导出看板。"""
     try:  # Windows 控制台默认 GBK，统一成 UTF-8 避免中文与货币符号乱码
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:

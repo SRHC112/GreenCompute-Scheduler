@@ -24,6 +24,8 @@ REQUIRED_PLAN_FIELDS = ("pool_id", "start_min")
 
 @dataclass
 class Defect:
+    """一条可归因的缺陷：代码/层级/责任角色/责任节点/细节/证据/作业号/是否阻塞/动作。
+    唯有责任角色 + 责任节点齐全，定向返工才只退一个节点。"""
     code: str
     layer: str
     owner: str
@@ -35,37 +37,46 @@ class Defect:
     action: str = ""
 
     def as_dict(self) -> dict:
+        """原样转字典，供报告与 API 直接下发（字段名即协议字段）。"""
         return dict(self.__dict__)
 
 
 @dataclass
 class VerifyReport:
+    """验证报告：缺陷清单 + 已检查作业数。blocking 属性只返回阻塞项。"""
     defects: list[Defect] = field(default_factory=list)
     checked: int = 0
 
     @property
     def blocking(self) -> list[Defect]:
+        """只返回阻塞项（blocking=True）；提示项（blocking=False）不触发返工。"""
         return [d for d in self.defects if d.blocking]
 
     def by_layer(self) -> dict[str, int]:
+        """按 L1~L5 层级统计缺陷数量。"""
         out: dict[str, int] = {}
         for d in self.defects:
             out[d.layer] = out.get(d.layer, 0) + 1
         return out
 
     def as_dict(self) -> dict:
+        """转成报告字段：检查数、缺陷总数、分层计数与缺陷明细。"""
         return {"checked": self.checked, "count": len(self.defects),
                 "by_layer": self.by_layer(),
                 "defects": [d.as_dict() for d in self.defects]}
 
 
 class Verifier:
+    """五层验证器：能用规则判定的，绝不交给模型判定。输出不是“通过/不通过”，而是可归因的缺陷清单。"""
+
     def __init__(self, pack: KnowledgePack, llm: ModelGateway | None = None):
+        """绑定知识包与可选网关；没有网关时 L5 退化为确定性规则，不依赖网络。"""
         self.pack = pack
         self.llm = llm
 
     def verify(self, jobs: list[Job], plan: dict[str, dict], results: list[JobResult],
                metrics: RunMetrics) -> VerifyReport:
+        """依次做 L1 结构 → L2 数值 → L3 约束 → L4 可达性 → L5 语义（Judge）校验。"""
         rep = VerifyReport()
         self._l1_structure(jobs, plan, results, rep)
         self._l2_numbers(jobs, plan, results, rep)
@@ -77,6 +88,7 @@ class Verifier:
 
     # ---------------- L1 ----------------
     def _l1_structure(self, jobs, plan, results, rep: VerifyReport) -> None:
+        """L1 结构层：每个作业必须有方案、方案必须有必需字段、必须产出执行结果。"""
         scheduled = {r.job_id for r in results}
         for job in jobs:
             if job.id not in plan:
@@ -100,6 +112,7 @@ class Verifier:
 
     # ---------------- L2 ----------------
     def _l2_numbers(self, jobs, plan, results, rep: VerifyReport) -> None:
+        """L2 数值层：按知识包公式重算成本，容差取 max(0.5 元, 0.5%)，防“账对不上”。"""
         by_id = {j.id: j for j in jobs}
         for r in results:
             job = by_id.get(r.job_id)
@@ -125,6 +138,7 @@ class Verifier:
 
     # ---------------- L3 ----------------
     def _l3_constraints(self, jobs, results, rep: VerifyReport) -> None:
+        """L3 约束层：SLA / 预算 / 绿电下限；违反时按偏差方向判定该退 A2 还是 A3。"""
         by_id = {j.id: j for j in jobs}
         for r in results:
             job = by_id.get(r.job_id)
@@ -177,6 +191,7 @@ class Verifier:
 
     # ---------------- L4 ----------------
     def _l4_reachability(self, plan, rep: VerifyReport) -> None:
+        """L4 可达性层：引用的资源池必须存在，决策必须有可追溯依据（缺依据计入证据强度）。"""
         valid_pools = {p.id for p in self.pack.pools}
         for job_id, p in plan.items():
             if p["pool_id"] not in valid_pools:
@@ -200,9 +215,23 @@ class Verifier:
 
     # ---------------- L5 ----------------
     def _l5_semantics(self, jobs, plan, rep: VerifyReport) -> None:
-        """语义层：结论与依据是否匹配。有模型时用 Judge，离线时用规则。"""
+        """语义层：结论与依据是否匹配。有模型时用 Judge，离线时用规则。
+
+        注意：规则兜底必须检查 rationale 的**取值**，而不是把 dict 直接 str 化。
+        否则 `str({"选定": "", "排除更便宜": ""})` 里也含“选定”“排除”两个键名，
+        L5 会恒通过，这一层就形同虚设。
+        """
         for job_id, p in plan.items():
-            text = str(p.get("rationale", ""))
+            rat = p.get("rationale")
+            if isinstance(rat, dict):
+                chosen = str(rat.get("选定", "")).strip()
+                excl = [str(rat.get(k, "")).strip()
+                        for k in ("排除更便宜", "排除更绿")]
+                excl = [x for x in excl if x]
+                text = (f"选定：{chosen}；排除：{' / '.join(excl)}"
+                        if chosen else "")
+            else:
+                chosen, excl, text = str(rat or "").strip(), [], str(rat or "")
             if not text or len(text) < 8:
                 continue
             if self.llm and self.llm.online:
@@ -211,8 +240,8 @@ class Verifier:
                     f"决策：{p['pool_id']} @ {p['start_min']}；依据：{text}")
                 ok = "PASS" in verdict.upper()
             else:
-                # 规则兜底：依据必须同时给出“选定”与至少一条排除理由
-                ok = ("选定" in text) and ("排除" in text)
+                # 规则兜底：既要说清选了什么，也要说清排除了什么
+                ok = bool(chosen) and bool(excl)
             if not ok:
                 rep.defects.append(Defect(
                     "L5-依据不自洽", "L5", "A3", "n_schedule",
