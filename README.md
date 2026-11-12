@@ -64,7 +64,7 @@ python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 ```
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
-→ 跑 12 个冒烟测试与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 跑 65 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
 → 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
 
 **唯一的一次交互确认**
@@ -144,7 +144,7 @@ python -c "import yaml; print('PyYAML', yaml.__version__)"
 python -m unittest discover -s tests -v
 ```
 
-预期输出：`Ran 12 tests ... OK`，耗时 < 1 秒（实测 0.042s）。
+预期输出：`Ran 65 tests ... OK`，耗时 < 1 秒（实测 0.042s）。
 
 ### 3.2 一键完整编排（核心演示）
 
@@ -214,7 +214,7 @@ python evaluation/run_eval.py
 
 ## 四、验证清单（如何确认跑对了）
 
-1. `python -m unittest discover -s tests -v` → **12 个用例全绿**。
+1. `python -m unittest discover -s tests -v` → **65 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
 4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行。
@@ -225,7 +225,7 @@ python evaluation/run_eval.py
 
 | Job | 覆盖内容 |
 |---|---|
-| `test` | Ubuntu × Python 3.10 / 3.11 / 3.12 / 3.13 + Windows × 3.13；语法编译、12 个冒烟测试、一键编排、看板产物校验、操作台 HTTP 探测 |
+| `test` | Ubuntu × Python 3.10 / 3.11 / 3.12 / 3.13 + Windows × 3.13；语法编译、单元测试（全量），一键编排、看板产物校验、操作台 HTTP 探测、trace_fit 参数对齐校验 |
 | `evaluation` | 六组对照实验，校验 `results.csv` 为 18 行且每组 3 次，检查三份报告文件 |
 
 看板与评测报告会作为 Artifact 上传，分别保留 7 / 14 天，可在 Actions 运行页下载。
@@ -298,10 +298,12 @@ GreenCompute-Scheduler/
 ├── app/
 │   └── server.py                  零依赖可视化操作台（仅标准库）
 ├── tests/
-│   └── test_smoke.py              12 个冒烟测试
+│   └── test_smoke.py              65 个冒烟测试（含 Pareto 权重缩放、trace_fit 参数对齐）
 ├── docs/
 │   ├── 架构说明.md                 架构与关键设计说明
 │   ├── DEPLOY.md                  Git 部署/推送流程与排障
+│   ├── 参数出处.md                 每个关键参数的取值、来源与可信度表
+│   ├── 性能与并发.md              实测吞吐、并发加速比与可复现性结论
 │   └── THIRD_PARTY.md             第三方依赖与许可声明
 ├── runs/                          运行产物（.gitkeep 占位，内容不入仓）
 ├── .gitignore
@@ -340,6 +342,13 @@ GreenCompute-Scheduler/
 只有 Policy 开关不同——这保证对照实验站得住。
 G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框架运行结果。
 
+评测脚本除六组对照外，还输出两份反事实扫描（都在 `evaluation/summary.md` 里）：
+
+- **参数敏感性**：返工阈值 60/70/80/90/95、绿电权重 0/15/35/60%，用于回答「结论是不是调参调出来的」；
+- **排队—成本帕累托前沿**：只放大排队权重、约束与数据不变，回答「平均排队从 13.8 分钟降到 0.4 分钟，这个代价值不值、能不能换回来」。
+
+结论的措辞纪律：置信区间跨 0 的指标一律只写“方向性”，不写成确定性收益。
+
 ## 九、核心设计（一句话版）
 
 | 机制 | 做法 | 带来什么 |
@@ -360,7 +369,17 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 | [README.md](README.md) | 项目说明、安装与运行方法（本文） |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | Git 部署与推送流程、认证配置、代理排障 |
 | [docs/架构说明.md](docs/架构说明.md) | 架构与关键设计说明 |
+| [docs/参数出处.md](docs/参数出处.md) | 每个关键参数的取值、来源与可信度表 |
+| [docs/性能与并发.md](docs/性能与并发.md) | 实测吞吐、并发加速比与可复现性结论 |
 | [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | 第三方依赖与许可声明 |
+| [docs/流程基线符合性记录.md](docs/流程基线符合性记录.md) | 《产品项目研发流程规范》31 项产出物逐项事实对照 |
+| [docs/差异及处理方式记录.md](docs/差异及处理方式记录.md) | 流程口径差异 D-01~D-10、内容规格偏离 S-01~S-08 登记与审批占位 |
+| [docs/分支与合并规范.md](docs/分支与合并规范.md) | 五类分支、合并路径、Code Review 规则与现状过渡方案 |
+| [docs/闭环确认清单.md](docs/闭环确认清单.md) | H/M/L 问题逐项闭环状态与证据来源 |
+| [docs/SRS_需求规格说明书.md](docs/SRS_需求规格说明书.md) | 自建需求规格说明书 |
+| [docs/RTM_需求追踪矩阵.md](docs/RTM_需求追踪矩阵.md) | 需求追踪矩阵 |
+| [docs/测试计划.md](docs/测试计划.md) / [docs/测试用例.md](docs/测试用例.md) / [docs/测试报告.md](docs/测试报告.md) | 测试三件套 |
+| [docs/验收单.md](docs/验收单.md) / [docs/回滚预案.md](docs/回滚预案.md) / [docs/复盘记录.md](docs/复盘记录.md) | 验收与复盘 |
 
 ## 十一、许可与引用
 

@@ -182,7 +182,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 - [ ] `git ls-remote origin main` 返回的 commit 与本地 `git rev-parse HEAD` 一致；
 - [ ] GitHub 网页端 README 正常渲染，`LICENSE` 显示为 Apache-2.0；
 - [ ] 仓库中不存在 `.env`、`__pycache__`、`runs/run_*`；
-- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，12 个冒烟测试全绿。
+- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，65 个单元测试全绿（其中 12 个为冒烟测试）。
 
 ---
 
@@ -198,7 +198,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 | `test` job | Ubuntu × Python 3.10/3.11/3.12/3.13，另加 Windows × Python 3.13 |
 | `evaluation` job | Ubuntu × Python 3.13，跑六组对照实验并校验结果完整性 |
 
-**检查项**：`compileall` 语法检查 → `unittest` 12 用例 → `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与 18 行 CSV 校验。
+**检查项**：`compileall` 语法检查 → 单元测试（全量，65 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
 
 **查看结果**：仓库首页 Actions 标签页，或 README 顶部的 CI 徽章。失败的 Artifact 仍会上传，便于下载 `console.html` / `results.csv` 定位问题。
 
@@ -207,6 +207,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 1. CI 里 `python evaluation/run_eval.py` 会重新生成 `evaluation/` 下的结果文件，但**只在 runner 的工作区生效，不会提交回仓库**；本地重跑才会产生 `git diff`。
 2. `results.csv` 以 `utf-8-sig`（带 BOM）写出，脚本里读取必须用 `encoding="utf-8-sig"`，否则首列字段名会变成 `\ufeffgroup`。
 3. 工作流使用 `shell: python` 做跨平台产物校验，避免在 Windows runner 上写两套 bash/PowerShell 脚本。但 **Windows runner 的 stdout 默认 cp1252**，脚本里的中文 `print` 会抛 `UnicodeEncodeError`（2026-11-11 首次运行 Windows job 即因此失败，其余 5 个 job 全绿）。因此校验脚本统一用 ASCII 英文输出，并在开头 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` 兜底；新增校验步骤请沿用该约定。
+6. 评测产物一致性：CI 校验 `summary.json` 必须与 `results.csv` 同批（时效检查），且含 6 组、操作台可直接消费的结构；否则无法通过。
 4. 新增 Python 版本支持时，同步改矩阵与 README 里的环境要求；`setup-python` 的 pip 缓存依赖 `requirements.txt`，改依赖名要一并检查。
 5. CI 不需要任何 Secret；项目可选的大模型配置（`GCS_LLM_*`）不参与 CI，系统按离线确定性模式运行，指标数值不受影响。
 
