@@ -34,3 +34,17 @@ evaluation/*.tmp
 run.bat
 run.sh
 .gcs_install_probe
+
+# 本地密钥的所有变体（模板必须显式放行，否则会把 .env.example 一起忽略掉）
+.env*
+!.env.example
+
+# 一次性调试脚本与其输出（定位在仓库根，属临时文件）
+v.txt
+doc_miss.py
+doc_perf.py
+
+# 评测中间产物：只放行 summary.json（操作台读取的作品证据），其余扫描结果不入库
+evaluation/*.json
+!evaluation/summary.json
+evaluation/traces/

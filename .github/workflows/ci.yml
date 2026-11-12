@@ -60,8 +60,16 @@ jobs:
           python -m py_compile install.py
           python install.py --check
 
-      - name: 冒烟测试（12 个用例）
-        run: python -m unittest discover -s tests -v
+      # 覆盖率工具只装在 CI（开发/运行时依赖仍仅 PyYAML，见 README「唯一运行时依赖」承诺）
+      - name: 单元测试（unittest 全量 + 覆盖率统计）
+        run: |
+          python -m pip install coverage
+          python -m coverage run --source=gcs -m unittest discover -s tests -v
+
+      # 基线八（三）L107-108「设定覆盖率目标并纳入 CI」+ SRS TG-06 70% 取并集（更严者）
+      # 本地实测基线：gcs/ 核心逻辑 87%（66 个单测）
+      - name: 覆盖率检查（核心逻辑 gcs/ 目标 ≥70%）
+        run: python -m coverage report --show-missing --fail-under=70
 
       - name: 一键编排演示
         run: python -m gcs.demo --jobs 20 --seed 7
@@ -139,10 +147,13 @@ jobs:
 
       # 注意：run_eval.py 用 utf-8-sig 写 CSV（带 BOM），读取时必须用同一编码。
       # 输出同样保持 ASCII，兼容 Windows runner 的 cp1252 stdout。
+      # 除了「存在且非空」，还要校验 summary.json 是本次运行写出的、结构可被操作台消费，
+      # 否则仓库里随 commit 带入的旧文件会让该检查形同虚设。
       - name: 校验评测结果完整性
         shell: python
         run: |
           import csv
+          import json
           import sys
           from collections import Counter
           from pathlib import Path
@@ -156,10 +167,26 @@ jobs:
           assert len(rows) == 18, f"expected 18 rows (6 groups x 3 seeds), got {len(rows)}"
           groups = Counter(r["group"] for r in rows)
           assert len(groups) == 6 and set(groups.values()) == {3}, f"bad group distribution: {groups}"
+
+          csv_mtime = p.stat().st_mtime
           for name in ("summary.md", "summary.json", "eval_report.html"):
               q = Path("evaluation") / name
               assert q.is_file() and q.stat().st_size > 0, f"missing {name}"
-          print(f"OK: {len(rows)} rows, groups {dict(groups)}")
+              assert q.stat().st_mtime >= csv_mtime - 5, f"stale {name}: older than results.csv"
+
+          s = json.loads(Path("evaluation/summary.json").read_text(encoding="utf-8"))
+          assert len(s) == 6, f"summary.json has {len(s)} groups, expected 6"
+          for code, g in s.items():
+              assert set(g) >= {"name", "n", "sla_rate", "budget_rate", "cost_per_gpu_hour"}, \
+                  f"summary.json schema mismatch for {code}"
+              for k, v in g.items():
+                  if k in ("name",):
+                      continue
+                  if k == "n":
+                      assert isinstance(v, int), f"{code}.n must be int"
+                      continue
+                  assert isinstance(v, list) and len(v) == 2, f"{code}.{k} must be [mean, sd]"
+          print(f"OK: {len(rows)} rows, groups {dict(groups)}, summary.json fresh with {len(s)} groups")
 
       - name: 上传评测报告
         if: always()
