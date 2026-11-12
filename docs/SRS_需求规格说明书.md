@@ -103,7 +103,7 @@
 
 ## 五、验收标准（与验收单对应）
 
-- `python -m unittest discover -s tests -v` 全部通过（65 个测试）。
+- `python -m unittest discover -s tests -v` 全部通过（74 个测试）。
 - `python evaluation\trace_fit.py` 四项硬断言全部通过（电价时段、峰谷比、排放因子、绿电曲线）。
 - `python -m gcs.demo --jobs 60 --seed 20261111` 生成 `runs/latest.html` 且可在浏览器离线打开。
 - `python evaluation\run_eval.py` 产出 `results.csv`（18 行）、`summary.md`、`eval_report.html`。

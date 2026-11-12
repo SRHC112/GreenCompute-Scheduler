@@ -64,7 +64,7 @@ python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 ```
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
-→ 跑 65 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 跑 74 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
 → 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
 
 **唯一的一次交互确认**
@@ -214,7 +214,7 @@ python evaluation/run_eval.py
 
 ## 四、验证清单（如何确认跑对了）
 
-1. `python -m unittest discover -s tests -v` → **65 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
+1. `python -m unittest discover -s tests -v` → **74 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
 4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行。
@@ -260,9 +260,18 @@ python -m gcs.demo --jobs 60
 |---|---|
 | `GCS_LLM_BASE_URL` | OpenAI 兼容接口地址 |
 | `GCS_LLM_API_KEY` | 接口密钥 |
-| `GCS_LLM_MODEL` | 模型名，默认 `deepseek-chat` |
+| `GCS_LLM_MODEL` | 主模型名，默认 `deepseek-chat` |
+| `GCS_LLM_LITE_MODEL` | 轻量模型名（可选，如 `qwen-turbo`）；留空时 light 层回落主模型 |
 
 支持 DeepSeek、智谱 GLM、阿里 Qwen、火山 Doubao、百度千帆、MiniMax 等 OpenAI 兼容接口。
+
+**模型路由与自定义适配器**（`gcs/llm.py`）：
+
+- 两级路由：`chat(..., tier="primary")`（默认，归因叙述 / 语义 Judge）与 `tier="light"`（轻量任务）；
+  配置 `GCS_LLM_LITE_MODEL` 后 light 层走轻量模型，未配置自动回落主模型；
+- 自定义适配器：继承 `OpenAICompatAdapter` 覆盖 `complete()`，经 `ModelGateway(adapter=...)`
+  注入即可接管全部在线请求（不同 API 方言 / 自建代理 / mock 测试），预算、降级与记账逻辑不受影响；
+- `gateway.stats()` 额外返回 `model_lite` / `adapter` / `tier_stats`（分层模型与 token 用量）。
 
 > **安全提示**：密钥只通过环境变量传入，**代码不会自动加载 `.env`**，绝不要写进源码或提交到仓库；
 > `.env` / `.env.local` 已在 `.gitignore` 中排除。
@@ -298,7 +307,7 @@ GreenCompute-Scheduler/
 ├── app/
 │   └── server.py                  零依赖可视化操作台（仅标准库）
 ├── tests/
-│   └── test_smoke.py              65 个冒烟测试（含 Pareto 权重缩放、trace_fit 参数对齐）
+│   └── test_smoke.py              12 个冒烟测试（含 Pareto 权重缩放、trace_fit 参数对齐）；tests/ 合计 74 个
 ├── docs/
 │   ├── 架构说明.md                 架构与关键设计说明
 │   ├── DEPLOY.md                  Git 部署/推送流程与排障

@@ -9,7 +9,7 @@
     ① 任务发起：填作业数/种子/策略组 → 触发一次真实编排
     ② DAG 拓扑：八个状态机与节点状态，返工边高亮
     ③ 运行轨迹：逐条事件，含角色、节点、缺陷归因
-    ④ 评测看板：五组对照实验结果与相对提升
+    ④ 评测看板：六组对照实验结果与相对提升
 
 启动：
     python app/server.py            # 默认 http://127.0.0.1:8000
@@ -197,7 +197,7 @@ tr:nth-child(even) td{background:#F8FAFD}
   </div>
 </section>
 <section class="panel" id="p4">
-  <div class="card"><h2>五组对照实验看板</h2>
+  <div class="card"><h2>六组对照实验看板</h2>
     <div class="hint">同一模拟器数据、同一知识包、同一评测脚本，3 个种子重复 3 次，报均值±标准差。</div>
     <div id="board"></div>
   </div>

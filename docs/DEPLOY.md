@@ -182,7 +182,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 - [ ] `git ls-remote origin main` 返回的 commit 与本地 `git rev-parse HEAD` 一致；
 - [ ] GitHub 网页端 README 正常渲染，`LICENSE` 显示为 Apache-2.0；
 - [ ] 仓库中不存在 `.env`、`__pycache__`、`runs/run_*`；
-- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，65 个单元测试全绿（其中 12 个为冒烟测试）。
+- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，74 个单元测试全绿（其中 12 个为冒烟测试）。
 
 ---
 
@@ -198,7 +198,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 | `test` job | Ubuntu × Python 3.10/3.11/3.12/3.13，另加 Windows × Python 3.13 |
 | `evaluation` job | Ubuntu × Python 3.13，跑六组对照实验并校验结果完整性 |
 
-**检查项**：`compileall` 语法检查 → 单元测试（全量，65 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
+**检查项**：`compileall` 语法检查 → 单元测试（全量，74 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
 
 **查看结果**：仓库首页 Actions 标签页，或 README 顶部的 CI 徽章。失败的 Artifact 仍会上传，便于下载 `console.html` / `results.csv` 定位问题。
 

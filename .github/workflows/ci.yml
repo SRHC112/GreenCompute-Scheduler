@@ -67,7 +67,7 @@ jobs:
           python -m coverage run --source=gcs -m unittest discover -s tests -v
 
       # 基线八（三）L107-108「设定覆盖率目标并纳入 CI」+ SRS TG-06 70% 取并集（更严者）
-      # 本地实测基线：gcs/ 核心逻辑 87%（66 个单测）
+      # 本地实测基线：gcs/ 核心逻辑 87%（74 个单测）
       - name: 覆盖率检查（核心逻辑 gcs/ 目标 ≥70%）
         run: python -m coverage report --show-missing --fail-under=70
 

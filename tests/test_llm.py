@@ -16,7 +16,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from gcs.llm import BudgetExceeded, ModelGateway, _count  # noqa: E402
+from gcs.llm import (BudgetExceeded, ModelGateway, OpenAICompatAdapter,  # noqa: E402
+                     _count)
 
 OFFLINE_ENV = {"GCS_LLM_BASE_URL": "", "GCS_LLM_API_KEY": "", "GCS_LLM_MODEL": ""}
 JUDGE_SYS = "你是调度决策审核员。判断决策依据是否自洽，只回答 PASS 或 FAIL。"
@@ -108,10 +109,10 @@ class TestAccountingAndBudget(unittest.TestCase):
             llm._check_budget()
         self.assertIn("/1", str(ctx.exception))
 
-    def test_budget_exhaustion_degrades_instead_of_crashing(self):
-        """预算耗尽是降级条件而非致命错误：chat 必须返回模板文本并标记 degraded。"""
+    def test_degraded_mode_sticks_after_budget_exhaustion(self):
+        """预算耗尽后网关保持 degraded 标记，后续调用继续走模板且不崩溃。"""
         llm = ModelGateway(token_budget=1)
-        llm.chat("撰写报告", "本批次一句话。")  # 这一次把预算用光
+        llm.chat("撰写报告", "本批次一句话。")
         text = llm.chat("撰写报告", "再看一句。")
         self.assertTrue(text)
         self.assertEqual(llm.mode, "degraded(BudgetExceeded)")
@@ -150,6 +151,88 @@ class TestDegradation(unittest.TestCase):
             llm = ModelGateway()
             self.assertTrue(llm.online)
             self.assertEqual(llm.base_url, "https://api.deepseek.com/v1", "末尾斜杠应被去掉")
+
+
+class TestModelRouting(unittest.TestCase):
+    """M2 模型路由（SRS 8.1 AI-M01/M04、FR-M02-009）：主模型 + 轻量模型两级。"""
+
+    def setUp(self):
+        self._env = mock.patch.dict("os.environ", OFFLINE_ENV)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def test_lite_model_falls_back_to_primary_when_unset(self):
+        llm = ModelGateway()
+        self.assertEqual(llm.lite_model, "")
+        self.assertEqual(llm._resolve_model("light"), llm.model,
+                         "未配置轻量模型时 light 层应回落主模型")
+        self.assertEqual(llm._resolve_model("primary"), llm.model)
+
+    def test_lite_model_env_configures_second_model(self):
+        with mock.patch.dict("os.environ", {"GCS_LLM_LITE_MODEL": "qwen-turbo"}):
+            llm = ModelGateway()
+        self.assertEqual(llm._resolve_model("light"), "qwen-turbo")
+        self.assertEqual(llm._resolve_model("primary"), llm.model)
+        self.assertEqual(llm.stats()["model_lite"], "qwen-turbo")
+
+    def test_light_tier_routes_to_lite_model_when_online(self):
+        llm = ModelGateway()
+        llm.online = True
+        llm.lite_model = "qwen-turbo"
+        with mock.patch.object(llm, "_request", return_value="轻量叙述") as req:
+            out = llm.chat("撰写报告", "本批次 20 个作业。", tier="light")
+        self.assertEqual(out, "轻量叙述")
+        self.assertEqual(req.call_args.kwargs["model"], "qwen-turbo",
+                         "light 层在线请求必须发给轻量模型")
+
+    def test_unknown_tier_is_rejected(self):
+        llm = ModelGateway()
+        with self.assertRaises(ValueError):
+            llm.chat("撰写报告", "本批次一句话。", tier="heavy")
+
+    def test_stats_report_per_tier_accounting(self):
+        llm = ModelGateway()
+        llm.chat("撰写报告", "本批次第一段事实。")
+        llm.chat("撰写报告", "本批次第二段事实。", tier="light")
+        st = llm.stats()
+        self.assertEqual(st["tier_stats"]["primary"]["calls"], 1)
+        self.assertEqual(st["tier_stats"]["light"]["calls"], 1)
+        self.assertEqual(st["tier_stats"]["light"]["model"], llm.model,
+                         "未配置轻量模型时记账中应体现回落主模型")
+        self.assertEqual(st["calls"], 2)
+
+
+class TestCustomAdapter(unittest.TestCase):
+    """M2 自定义适配器（SRS FR-M02-009）：注入即接管在线请求。"""
+
+    def setUp(self):
+        self._env = mock.patch.dict("os.environ", OFFLINE_ENV)
+        self._env.start()
+        self.addCleanup(self._env.stop)
+
+    def test_default_adapter_is_openai_compat(self):
+        self.assertEqual(ModelGateway().adapter.name, "openai-compat")
+        self.assertEqual(ModelGateway().stats()["adapter"], "openai-compat")
+
+    def test_custom_adapter_takes_over_online_requests(self):
+        seen = []
+
+        class EchoAdapter(OpenAICompatAdapter):
+            name = "echo"
+            def complete(self, **kw):
+                seen.append(kw)
+                return "ECHO:" + kw["model"]
+
+        llm = ModelGateway(adapter=EchoAdapter())
+        llm.online = True
+        out = llm.chat("撰写报告", "本批次 20 个作业。", tier="light")
+        self.assertEqual(out, "ECHO:" + llm.model)  # lite 未配置 → 回落主模型
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["model"], llm.model)
+        self.assertEqual(seen[0]["base_url"], llm.base_url)
+        st = llm.stats()
+        self.assertEqual(st["adapter"], "echo")
+        self.assertEqual(st["tier_stats"]["light"]["calls"], 1)
 
 
 if __name__ == "__main__":
