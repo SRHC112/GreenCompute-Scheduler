@@ -291,10 +291,10 @@ def verify_install(root: Path, py: Path) -> str:
     out = (p.stdout or "") + (p.stderr or "")
     if p.returncode != 0 or "OK" not in out:
         tail = "\n".join(out.strip().splitlines()[-12:])
-        raise InstallError("冒烟测试未通过", tail or "请查看上方测试输出。")
+        raise InstallError("单元测试未通过", tail or "请查看上方测试输出。")
     m = re.search(r"Ran (\d+) tests", out)
     count = m.group(1) if m else "?"
-    ok(f"冒烟测试：{count} 个用例全部通过")
+    ok(f"单元测试：{count} 个用例全部通过")
     run_checked([str(py), "-m", "gcs.demo", "--jobs", "20", "--seed", "7"],
                 cwd=root, env=env, hint="编排演示失败，请检查上方错误输出。")
     ok("编排演示：通过（强制离线模式，未消耗模型额度）")
@@ -637,7 +637,7 @@ def main(argv=None) -> int:
         print(f"  项目目录   ：{root}")
         print(f"  虚拟环境   ：{root / '.venv'}")
         print(f"  依赖       ：PyYAML {version}")
-        print(f"  冒烟测试   ：{tests} 个用例全部通过")
+        print(f"  单元测试   ：{tests} 个用例全部通过")
         print(f"  编排演示   ：通过（离线模式，未消耗模型额度）")
         print(f"  大模型接入 ：{llm_state}")
         print("  运行方式   ：run.bat demo      （Windows，跑完整演示）")

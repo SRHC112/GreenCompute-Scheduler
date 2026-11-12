@@ -144,7 +144,7 @@ python -c "import yaml; print('PyYAML', yaml.__version__)"
 python -m unittest discover -s tests -v
 ```
 
-预期输出：`Ran 74 tests ... OK`，耗时 < 1 秒（实测 0.042s）。
+预期输出：`Ran 74 tests ... OK`，实测耗时约 2 秒（Python 3.13 / Windows）。
 
 ### 3.2 一键完整编排（核心演示）
 
@@ -225,7 +225,7 @@ python evaluation/run_eval.py
 
 | Job | 覆盖内容 |
 |---|---|
-| `test` | Ubuntu × Python 3.10 / 3.11 / 3.12 / 3.13 + Windows × 3.13；语法编译、单元测试（全量），一键编排、看板产物校验、操作台 HTTP 探测、trace_fit 参数对齐校验 |
+| `test` | Ubuntu × Python 3.10 / 3.11 / 3.12 / 3.13 + Windows × 3.13；语法编译（全量）、安装脚本自检（`--check` 只读预检）、单元测试（全量）+ 覆盖率门禁（`gcs/` ≥ 70%）、一键编排、看板产物校验、操作台 HTTP 探测 |
 | `evaluation` | 六组对照实验，校验 `results.csv` 为 18 行且每组 3 次，检查三份报告文件 |
 
 看板与评测报告会作为 Artifact 上传，分别保留 7 / 14 天，可在 Actions 运行页下载。
@@ -306,8 +306,13 @@ GreenCompute-Scheduler/
 │   └── eval_report.html           对比看板（可直接截图）
 ├── app/
 │   └── server.py                  零依赖可视化操作台（仅标准库）
-├── tests/
-│   └── test_smoke.py              12 个冒烟测试（含 Pareto 权重缩放、trace_fit 参数对齐）；tests/ 合计 74 个
+├── tests/                         单元测试合计 74 个
+│   ├── test_smoke.py              12 个冒烟测试（知识包 / 确定性 / 编排收敛 / 指标有限性）
+│   ├── test_verifier.py           12 个五层验证器用例
+│   ├── test_reflect.py            11 个自省 rubric / 归因 / 返工用例
+│   ├── test_report.py             11 个看板与报告产物用例
+│   ├── test_pareto.py             5 个 Pareto 权重缩放用例
+│   └── test_llm.py                23 个模型网关用例（离线降级 / 预算 / 路由 / 适配器）
 ├── docs/
 │   ├── 架构说明.md                 架构与关键设计说明
 │   ├── DEPLOY.md                  Git 部署/推送流程与排障
