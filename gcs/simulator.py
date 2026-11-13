@@ -105,23 +105,44 @@ class RunMetrics:
 class Cluster:
     """资源池占用表。以 (start, end, gpus) 区间记录，支持回滚与定向重排。"""
 
-    def __init__(self, pack: KnowledgePack):
-        """按知识包里的资源池初始化占用表，每个池一条 (start, end, gpus, job_id) 记录链。"""
+    def __init__(self, pack: KnowledgePack, horizon_min: int | None = None):
+        """按知识包里的资源池初始化占用表，每个池一条 (start, end, gpus, job_id) 记录链。
+
+        P2-3.3：调度窗口改为可配置。优先级为「构造参数 > 知识包
+        scheduling.horizon_min > 模块默认 HORIZON_MIN」，默认值仍为 48 小时，
+        因此既有评测口径不受影响。
+        """
         self.pack = pack
+        if horizon_min is None:
+            horizon_min = (pack.raw or {}).get("scheduling", {}).get(
+                "horizon_min", HORIZON_MIN)
+        self.horizon_min = int(horizon_min)
+        if self.horizon_min <= 0:
+            raise ValueError(f"调度窗口必须为正数，收到 {self.horizon_min}")
         self.alloc: dict[str, list[tuple[int, int, int, str]]] = {p.id: [] for p in pack.pools}
 
     def fits(self, pool_id: str, start: int, duration: int, gpus: int) -> bool:
-        """判断某个时间窗内该池剩余卡数是否够用：切分端点后逐段检查峰值占用。"""
+        """判断某个时间窗内该池剩余卡数是否够用。
+
+        P1-2.5：原实现「切分端点后逐段重扫全部占用」是 O(n²)。改为扫描线：
+        把每条占用区间截断到 [start, end] 后生成 +g/-g 事件，排序一次即得
+        窗口内峰值占用，O(n log n)，与原来的逐段半开区间检查语义等价。
+        """
         cap = self.pack.pool(pool_id).gpus
         end = start + duration
-        if start < 0 or end > HORIZON_MIN:
+        if start < 0 or end > self.horizon_min or gpus > cap:
             return False
-        used = [(s, e, g) for s, e, g, _ in self.alloc[pool_id] if s < end and e > start]
-        # 计算区间内的峰值占用：切分所有端点后逐段检查
-        points = sorted({start, end} | {s for s, _, _ in used} | {e for _, e, _ in used})
-        for a, b in zip(points, points[1:]):
-            mid = (a + b) / 2
-            load = sum(g for s, e, g in used if s <= mid < e)
+        events: list[tuple[int, int]] = []
+        for s, e, g, _ in self.alloc[pool_id]:
+            a, b = max(s, start), min(e, end)
+            if a < b:
+                events.append((a, g))
+                events.append((b, -g))
+        # 同一时刻先释放（-g）再占用（+g），与半开区间 [s, e) 的语义一致
+        events.sort(key=lambda x: (x[0], x[1]))
+        load = 0
+        for _, delta in events:
+            load += delta
             if load + gpus > cap:
                 return False
         return True
@@ -138,7 +159,7 @@ class Cluster:
     def earliest_start(self, pool_id: str, not_before: int, duration: int, gpus: int) -> int | None:
         """从 not_before 起按 STEP_MIN 步进，返回该池最早的可行启动时刻；排不下返回 None。"""
         t = max(0, not_before)
-        while t + duration <= HORIZON_MIN:
+        while t + duration <= self.horizon_min:
             if self.fits(pool_id, t, duration, gpus):
                 return t
             t += STEP_MIN
@@ -146,7 +167,7 @@ class Cluster:
 
     def utilization(self) -> float:
         """整个排程窗口内的平均卡时利用率，用来判断是不是靠“空转”换来的低成本。"""
-        total_cap = sum(p.gpus for p in self.pack.pools) * HORIZON_MIN
+        total_cap = sum(p.gpus for p in self.pack.pools) * self.horizon_min
         used = sum((e - s) * g for items in self.alloc.values() for s, e, g, _ in items)
         return used / total_cap if total_cap else 0.0
 
@@ -158,7 +179,6 @@ def make_jobs(pack: KnowledgePack, n: int = 40, seed: int = 20261111,
     fault_ratio 控制在真实运行中会超时（实际延长）的作业比例；超时真值由
     (seed, 作业序号) 决定，与调度决策无关，保证返工无法“改真值”。
     """
-    rng = random.Random(seed)
     rng = random.Random(seed)
     types = list(pack.job_profiles)
     jobs: list[Job] = []

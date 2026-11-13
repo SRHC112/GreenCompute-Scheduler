@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -120,6 +121,8 @@ class Orchestrator:
         self.llm = llm
         self.policy = policy or Policy()
         self.dag = dag or build_default()
+        # 记录是否由调用方显式指定 DAG：run() 只能重置默认图，不能覆盖自定义图（P1-2.3）
+        self._dag_explicit = dag is not None
         self.profiler = Profiler(pack)
         self.scheduler = Scheduler(pack, llm)
         self.executor = Executor(pack)
@@ -128,6 +131,7 @@ class Orchestrator:
         self.reporter = Reporter(llm)
         self.events: list[Event] = []
         self.audit: list[dict] = []
+        self.learn_warnings: int = 0
 
     # ------------------------------------------------------------------
     def _emit(self, state: str, node: str, agent: str, detail: str, status: str = "done") -> None:
@@ -148,7 +152,12 @@ class Orchestrator:
         """
         started = time.time()
         cluster = cluster or Cluster(self.pack)
-        self.dag = build_default()
+        if self._dag_explicit:
+            # 显式传入的 DAG 必须真正生效；重跑前只重置运行态，不重建图结构。
+            for n in self.dag.nodes.values():
+                n.status, n.detail = "pending", ""
+        else:
+            self.dag = build_default()
         self.events, self.audit = [], []
 
         # ---------------- PARSE ----------------
@@ -320,7 +329,6 @@ class Orchestrator:
     def _rule_plan(self, jobs, estimates, cluster) -> dict[str, dict]:
         """按“最早完成 / 最早排队”规则生成备选排程方案，不走多目标求解。"""
         est = {e["job_id"]: e for e in estimates}
-        est = {e["job_id"]: e for e in estimates}
         if self.policy.rule == "fcfs":
             ordered = sorted(jobs, key=lambda j: j.arrive_min)
         else:
@@ -337,7 +345,7 @@ class Orchestrator:
                 continue
             pool_id, start = best
             cluster.place(pool_id, start, dur, job.gpus, job.id)
-            price, segment = self.pack.price_at(pool_id, start)
+            _, segment = self.pack.price_at(pool_id, start)
             plan[job.id] = {"job_id": job.id, "pool_id": pool_id, "start_min": start,
                             "duration_min": dur, "segment": segment,
                             "rationale": f"规则策略 {self.policy.rule.upper()} 选定最早的可行资源池",
@@ -345,9 +353,17 @@ class Orchestrator:
         return plan
 
     def profiler_learn_safe(self, results: list[JobResult], jobs: list[Job]) -> None:
-        """报告阶段的经验回写；失败不影响已产出的结果，避免“复盘异常拖垮整轮”。
+        """报告阶段的经验回写；失败不阻断已产出的结果，但必须留下可见告警。
+
+        P0-1.3：原实现 ``except Exception: pass`` 会把「失败即资产」经验库的
+        长期失效完全掩盖。改为向 stderr 写一条 WARN 并累加计数器，既不拖垮
+        整轮编排，又让问题可观测、可被单测断言。
         """
         try:
             self.profiler.learn(results, jobs)
-        except Exception:
-            pass
+        except Exception as exc:
+            self.learn_warnings += 1
+            sys.stderr.write(
+                f"[WARN] profiler.learn 失败，经验未回写（第 {self.learn_warnings} 次）："
+                f"{type(exc).__name__}: {exc}\n"
+            )

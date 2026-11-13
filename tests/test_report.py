@@ -6,6 +6,7 @@ console.html 必须同时满足两点：零依赖可在评委机打开；关键�
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -33,6 +34,13 @@ class TestConsoleRender(unittest.TestCase):
         out.mkdir(parents=True, exist_ok=True)
         cls.html = render_console(art, PACK.version, out / "console.html")
         cls.text = cls.html.read_text(encoding="utf-8")
+        # P0-1.2：原两例只调用了 .exists() 却没有断言，是永远通过的 no-op。
+        # 这里按 app/server.py::run_once 的落盘契约真实写出两份 JSON，
+        # 使测试能够捕获「产物不再生成 / 内容被改坏」这类回归。
+        (out / "artifact.json").write_text(
+            json.dumps(art.to_dict(), ensure_ascii=False), encoding="utf-8")
+        (out / "metrics.json").write_text(
+            json.dumps(art.metrics.as_dict(), ensure_ascii=False), encoding="utf-8")
         cls._cleanup = True
 
     def test_console_is_valid_html_document(self):
@@ -73,10 +81,23 @@ class TestConsoleRender(unittest.TestCase):
         self.assertIn("阈值", self.text)  # 看板把阈值作为 rubric 一部分渲染
 
     def test_artifact_json_writeable(self):
-        (ROOT / "runs" / "test_console" / "artifact.json").exists()
+        p = ROOT / "runs" / "test_console" / "artifact.json"
+        self.assertTrue(p.is_file(), "artifact.json 必须真实写出")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertEqual(data["policy"], POLICIES["generic"].name)
+        for key in ("dag", "events", "metrics", "audit", "plan"):
+            self.assertIn(key, data, f"artifact.json 缺少字段 {key}")
+        self.assertGreater(len(data["events"]), 0, "运行轨迹不应为空")
 
     def test_metrics_json_writeable(self):
-        (ROOT / "runs" / "test_console" / "metrics.json").exists()
+        p = ROOT / "runs" / "test_console" / "metrics.json"
+        self.assertTrue(p.is_file(), "metrics.json 必须真实写出")
+        data = json.loads(p.read_text(encoding="utf-8"))
+        self.assertGreater(data["jobs"], 0)
+        for key in ("sla_rate", "cost_per_gpu_hour", "avg_green_share",
+                    "green_window_ratio", "total_carbon_kg"):
+            self.assertIn(key, data, f"metrics.json 缺少指标 {key}")
+            self.assertIsInstance(data[key], (int, float))
 
     def test_console_html_is_utf8(self):
         self.assertTrue(self.html.read_bytes().startswith(b"<!DOCTYPE"))
