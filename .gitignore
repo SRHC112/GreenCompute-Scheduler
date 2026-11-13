@@ -44,7 +44,13 @@ v.txt
 doc_miss.py
 doc_perf.py
 
-# 评测中间产物：只放行 summary.json（操作台读取的作品证据），其余扫描结果不入库
+# 评测产物分类（P1-2.7）：作品证据随仓库提交并纳入参赛包；
+# 一次性调参中间产物不入库。summary.md 引用的五份 JSON 均属前者。
 evaluation/*.json
 !evaluation/summary.json
+!evaluation/sensitivity.json
+!evaluation/pareto.json
+!evaluation/ci_bootstrap.json
+!evaluation/diff_ci.json
+evaluation/trace_fit.json
 evaluation/traces/
