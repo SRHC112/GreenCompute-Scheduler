@@ -1,0 +1,52 @@
+{
+  "jobs": 80,
+  "seeds": [
+    20261111,
+    7,
+    42
+  ],
+  "rows": [
+    {
+      "wait_scale": 0.5,
+      "avg_wait_min": 19.375,
+      "cost_per_gpu_hour": 2.3857729470894546,
+      "green_window_ratio": 0.3955884253204065,
+      "sla_rate": 0.9833333333333333
+    },
+    {
+      "wait_scale": 1.0,
+      "avg_wait_min": 12.375,
+      "cost_per_gpu_hour": 2.3886082107340325,
+      "green_window_ratio": 0.37790841136100617,
+      "sla_rate": 0.9958333333333333
+    },
+    {
+      "wait_scale": 2.0,
+      "avg_wait_min": 3.4375,
+      "cost_per_gpu_hour": 2.4661948630145574,
+      "green_window_ratio": 0.35216573468597856,
+      "sla_rate": 1.0
+    },
+    {
+      "wait_scale": 4.0,
+      "avg_wait_min": 0.75,
+      "cost_per_gpu_hour": 2.5583021524998095,
+      "green_window_ratio": 0.33572714967670214,
+      "sla_rate": 1.0
+    },
+    {
+      "wait_scale": 8.0,
+      "avg_wait_min": 0.25,
+      "cost_per_gpu_hour": 2.757797560940853,
+      "green_window_ratio": 0.33572714967670214,
+      "sla_rate": 1.0
+    },
+    {
+      "wait_scale": 16.0,
+      "avg_wait_min": 0.25,
+      "cost_per_gpu_hour": 2.8654005364871495,
+      "green_window_ratio": 0.33572714967670214,
+      "sla_rate": 1.0
+    }
+  ]
+}

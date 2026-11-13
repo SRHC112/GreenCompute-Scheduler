@@ -1,0 +1,137 @@
+{
+  "jobs": 80,
+  "seeds": [
+    20261111,
+    7,
+    42
+  ],
+  "threshold": [
+    {
+      "threshold": 60,
+      "rounds": 1.0,
+      "final_rubric": 70.0,
+      "sla_rate": 0.9833333333333334,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3594928580920396,
+      "green_window_ratio": 0.40139912553934703,
+      "avg_green_share": 0.6982113463518183,
+      "avg_wait_min": 13.5,
+      "total_carbon_kg": 80.85287006997778,
+      "tokens": 153.0
+    },
+    {
+      "threshold": 70,
+      "rounds": 1.0,
+      "final_rubric": 70.0,
+      "sla_rate": 0.9833333333333334,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3594928580920396,
+      "green_window_ratio": 0.40139912553934703,
+      "avg_green_share": 0.6982113463518183,
+      "avg_wait_min": 13.5,
+      "total_carbon_kg": 80.85287006997778,
+      "tokens": 153.0
+    },
+    {
+      "threshold": 80,
+      "rounds": 2.3333333333333335,
+      "final_rubric": 90.0,
+      "sla_rate": 0.9958333333333333,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3886082107340325,
+      "green_window_ratio": 0.37790841136100617,
+      "avg_green_share": 0.6966834317376968,
+      "avg_wait_min": 12.375,
+      "total_carbon_kg": 82.79868674508889,
+      "tokens": 153.0
+    },
+    {
+      "threshold": 90,
+      "rounds": 2.3333333333333335,
+      "final_rubric": 90.0,
+      "sla_rate": 0.9958333333333333,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3886082107340325,
+      "green_window_ratio": 0.37790841136100617,
+      "avg_green_share": 0.6966834317376968,
+      "avg_wait_min": 12.375,
+      "total_carbon_kg": 82.79868674508889,
+      "tokens": 153.0
+    },
+    {
+      "threshold": 95,
+      "rounds": 2.3333333333333335,
+      "final_rubric": 90.0,
+      "sla_rate": 0.9958333333333333,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3886082107340325,
+      "green_window_ratio": 0.37790841136100617,
+      "avg_green_share": 0.6966834317376968,
+      "avg_wait_min": 12.375,
+      "total_carbon_kg": 82.79868674508889,
+      "tokens": 153.0
+    }
+  ],
+  "weights": [
+    {
+      "green_share_target": 0.0,
+      "green_scale": 0.0,
+      "rounds": 1.0,
+      "final_rubric": 100.0,
+      "sla_rate": 1.0,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3692704867095085,
+      "green_window_ratio": 0.35940125451057203,
+      "avg_green_share": 0.6904721811380358,
+      "avg_wait_min": 8.6875,
+      "total_carbon_kg": 84.43862239828889,
+      "tokens": 153.0,
+      "green_share_actual": 0.0
+    },
+    {
+      "green_share_target": 0.15,
+      "green_scale": 0.421,
+      "rounds": 1.0,
+      "final_rubric": 100.0,
+      "sla_rate": 1.0,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3673154159343626,
+      "green_window_ratio": 0.35940125451057203,
+      "avg_green_share": 0.6919783323272021,
+      "avg_wait_min": 7.125,
+      "total_carbon_kg": 83.84392394964445,
+      "tokens": 153.0,
+      "green_share_actual": 0.15447368421052632
+    },
+    {
+      "green_share_target": 0.35,
+      "green_scale": 0.982,
+      "rounds": 2.3333333333333335,
+      "final_rubric": 90.0,
+      "sla_rate": 0.9958333333333333,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3886082107340325,
+      "green_window_ratio": 0.37790841136100617,
+      "avg_green_share": 0.6966834317376968,
+      "avg_wait_min": 12.375,
+      "total_carbon_kg": 82.79868674508889,
+      "tokens": 153.0,
+      "green_share_actual": 0.36043859649122806
+    },
+    {
+      "green_share_target": 0.6,
+      "green_scale": 1.684,
+      "rounds": 2.6666666666666665,
+      "final_rubric": 80.0,
+      "sla_rate": 0.9833333333333333,
+      "budget_rate": 1.0,
+      "cost_per_gpu_hour": 2.3883170045310997,
+      "green_window_ratio": 0.4189710270844685,
+      "avg_green_share": 0.7034323000462273,
+      "avg_wait_min": 19.25,
+      "total_carbon_kg": 79.23398128851112,
+      "tokens": 153.0,
+      "green_share_actual": 0.6178947368421053
+    }
+  ]
+}
