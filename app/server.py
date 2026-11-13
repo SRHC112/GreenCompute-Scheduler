@@ -37,9 +37,12 @@ from gcs.llm import ModelGateway  # noqa: E402
 from gcs.orchestrator import Orchestrator  # noqa: E402
 from gcs.report import render_console  # noqa: E402
 from gcs.simulator import make_jobs  # noqa: E402
+from app.auth import AuthConfig, WWW_AUTHENTICATE  # noqa: E402
 
 PACK = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
 RUNS_DIR = ROOT / "runs"
+MAX_BODY = 1024 * 1024          # P1-2.1：请求体上限 1 MiB，超限返回 413
+AUTH = AuthConfig(root=ROOT)    # 进程启动时读取一次鉴权配置，无热加载
 
 # 内存中的最近若干次运行，供看板取用
 _STORE: dict[str, dict] = {}
@@ -81,7 +84,13 @@ def run_once(jobs_n: int, seed: int, policy_key: str) -> dict:
         "rubric": art.rubric_history[-1].as_dict() if art.rubric_history else None,
         "defects": art.defect_history[-1] if art.defect_history else None,
         "dag": art.dag.to_dict(),
-        "events": [e.as_dict() for e in art.events],
+        "events": [
+            # P2-3.4：把「每个角色只拿到自己需要的工具」的审计记录并入轨迹，
+            # 供操作台「使用工具」列展示；_emit 保证 audit 与 events 一一对应。
+            {**e.as_dict(),
+             "tool": art.audit[i]["tool"] if i < len(art.audit) else "-"}
+            for i, e in enumerate(art.events)
+        ],
         "narrative": art.narrative,
         "llm": art.llm,
         "elapsed_s": round(art.elapsed_s, 3),
@@ -98,6 +107,56 @@ def eval_board() -> dict:
     if not p.exists():
         return {"available": False, "message": "尚未运行对照实验，请先执行 python evaluation/run_eval.py"}
     return {"available": True, "groups": json.loads(p.read_text(encoding="utf-8"))}
+
+
+def list_runs() -> list[dict]:
+    """P2-3.2：只读列出磁盘上的历史运行，支持重启后回溯。
+
+    刻意不把历史 artifact.json 全量载入 _STORE（避免启动耗时与内存膨胀）；
+    实际内容在访问 /api/run/<rid> 时按需从磁盘读取。
+    """
+    if not RUNS_DIR.is_dir():
+        return []
+    out: list[dict] = []
+    for d in sorted(RUNS_DIR.iterdir(), key=lambda x: x.name, reverse=True):
+        if not d.is_dir() or safe_run_id(d.name) is None:
+            continue
+        out.append({
+            "run_id": d.name,
+            "has_console": (d / "console.html").is_file(),
+            "has_artifact": (d / "artifact.json").is_file(),
+            "console_url": f"/console/{d.name}",
+        })
+    return out[:50]
+
+
+def load_run_from_disk(rid: str) -> dict | None:
+    """把历史 artifact.json 转成与 run_once 返回值同形的 payload。"""
+    f = RUNS_DIR / rid / "artifact.json"
+    if not f.is_file():
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rubric = data.get("rubric") or []
+    return {
+        "run_id": rid,
+        "policy": data.get("policy"),
+        "policy_key": None,
+        "seed": None,
+        "jobs": (data.get("metrics") or {}).get("jobs"),
+        "metrics": data.get("metrics") or {},
+        "rounds": data.get("rounds"),
+        "rubric": rubric[-1] if rubric else None,
+        "defects": (data.get("defects") or [None])[-1],
+        "dag": data.get("dag"),
+        "events": data.get("events") or [],
+        "narrative": data.get("narrative") or "",
+        "llm": data.get("llm") or {},
+        "elapsed_s": data.get("elapsed_s"),
+        "console_url": f"/console/{rid}",
+    }
 
 
 PAGE = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -143,11 +202,16 @@ button.go:disabled{background:#B9C2CF;cursor:not-allowed}
 .legend{font-size:11px;color:#7A8699;margin-top:8px}
 .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
 .trace{max-height:520px;overflow:auto;font-size:12.5px}
-.ev{display:grid;grid-template-columns:42px 1fr;gap:8px;padding:7px 0;border-bottom:1px dashed #EDF0F5}
+.ev{display:grid;grid-template-columns:42px 1fr 92px;gap:8px;padding:7px 0;border-bottom:1px dashed #EDF0F5}
 .ev .sq{font-size:10.5px;color:#A6B0C0}
 .ev .st{display:inline-block;font-size:9.5px;padding:1px 6px;border-radius:3px;background:#E8EEF7;color:#2F6DB5;margin-right:6px}
 .ev .ag{color:#8B96A8;font-size:10.5px;margin-left:6px}
 .ev .dt{color:#3A4553;line-height:1.45;margin-top:2px}
+.ev .tool{font-size:10px;color:#2F6DB5;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.auth{display:flex;gap:6px;align-items:center}
+.auth label{margin:0;color:#AFC2DD;font-size:11px}
+.auth input{min-width:170px;padding:5px 8px;font-size:12px;background:#fff}
+.auth .sub{font-size:11px;white-space:nowrap}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{background:#1F3352;color:#fff;padding:8px;text-align:left;font-size:11.5px}
 td{padding:7px 8px;border-bottom:1px solid #EDF0F5;color:#3A4553}
@@ -159,7 +223,9 @@ tr:nth-child(even) td{background:#F8FAFD}
 </style></head><body>
 <header><div><h1>绿算调度 · 多智能体编排操作台</h1>
 <div class="sub">2026 第五届“未来杯”创新大赛 · 赛道一 Agent 编排创新应用 · 知识包 """ + "{ver}" + """</div></div>
-<div class="sub">本机运行 · 数据由确定性模拟器生成，可复现</div></header>
+<div class="auth"><label for="tok">访问凭据</label>
+<input id="tok" type="password" placeholder="对外演示时填写" autocomplete="off">
+<span id="authstate" class="sub">本机运行 · 确定性可复现</span></div></header>
 <nav>
   <button class="on" data-p="p1">① 任务发起</button>
   <button data-p="p2">② DAG 拓扑</button>
@@ -179,6 +245,7 @@ tr:nth-child(even) td{background:#F8FAFD}
     <div id="msg" style="margin-top:12px"></div>
     <div class="kpis" id="kpis"></div>
     <div id="narr" class="muted"></div>
+    <div id="hist" class="hint" style="margin-top:8px"></div>
   </div>
 </section>
 <section class="panel" id="p2">
@@ -192,7 +259,7 @@ tr:nth-child(even) td{background:#F8FAFD}
 </section>
 <section class="panel" id="p3">
   <div class="card"><h2>运行轨迹（逐条事件）</h2>
-    <div class="hint">每个事件带状态、角色、节点与细节；缺陷会给出责任角色与定向返工指令。</div>
+    <div class="hint">每个事件带状态、角色、节点与细节；缺陷会给出责任角色与定向返工指令；最右列是该事件实际使用的工具（角色工具白名单审计）。</div>
     <div class="trace" id="trace"></div>
   </div>
 </section>
@@ -206,6 +273,21 @@ tr:nth-child(even) td{background:#F8FAFD}
 <script>
 const $=s=>document.querySelector(s);
 let lastDag=null;
+// 静态 Token 只存当前标签页的 sessionStorage：不进 URL、不进 localStorage、
+// 不进日志，关闭标签即失效；由 authFetch 统一注入 Authorization 头。
+function getToken(){return sessionStorage.getItem('gcs_auth_token')||'';}
+function authFetch(url,opts){
+  opts=opts||{};
+  const h=Object.assign({},opts.headers||{});
+  if(getToken()) h['Authorization']='Bearer '+getToken();
+  return fetch(url,Object.assign({},opts,{headers:h}));
+}
+$('#tok').value=getToken();
+$('#authstate').textContent=getToken()?'凭据已设置':'本机运行 · 确定性可复现';
+$('#tok').addEventListener('change',()=>{
+  sessionStorage.setItem('gcs_auth_token',$('#tok').value.trim());
+  $('#authstate').textContent=getToken()?'凭据已设置':'本机运行 · 确定性可复现';
+});
 function goPanel(pid){
   document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('on',x.dataset.p===pid));
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('on',p.id===pid));
@@ -216,7 +298,7 @@ document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>goPanel(b.datas
 window.addEventListener('resize',()=>{
   if(lastDag&&$('#p2').classList.contains('on')) drawDag(lastDag);
 });
-fetch('/api/policies').then(r=>r.json()).then(d=>{
+authFetch('/api/policies').then(r=>r.json()).then(d=>{
   const sel=$('#policy');
   d.policies.forEach(p=>{const o=document.createElement('option');o.value=p.key;o.textContent=p.name;sel.appendChild(o);});
 });
@@ -256,22 +338,39 @@ function renderRun(d){
   $('#narr').textContent='运行摘要：'+d.narrative;
   drawDag(d.dag);
   $('#trace').innerHTML=d.events.map(e=>`<div class="ev"><div class="sq">#${String(e.seq).padStart(2,'0')}</div><div>`+
-    `<span class="st">${e.state}</span><span class="ag">${e.agent} · ${e.node}</span><div class="dt">${e.detail}</div></div></div>`).join('');
+    `<span class="st">${e.state}</span><span class="ag">${e.agent} · ${e.node}</span><div class="dt">${e.detail}</div></div>`+
+    `<div class="tool" title="使用工具">${e.tool||'-'}</div></div>`).join('');
 }
 $('#run').onclick=async()=>{
   $('#run').disabled=true;$('#msg').innerHTML='<div class="muted">编排执行中，请稍候……</div>';
   try{
-    const r=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await authFetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({jobs:parseInt($('#jobs').value,10),seed:parseInt($('#seed').value,10),policy:$('#policy').value})});
     const d=await r.json();
+    if(r.status===401)throw new Error('未授权：请在页首「访问凭据」填入 Token 后重试');
     if(!r.ok)throw new Error(d.error||'运行失败');
-    $('#msg').innerHTML=`<div class="muted">已完成：${d.run_id}（耗时 ${d.elapsed_s}s，模型 ${d.llm.mode}，token ${d.llm.tokens_total}）</div>`;
+    $('#msg').innerHTML=`<div class="muted">已完成：${d.run_id}（耗时 ${d.elapsed_s}s，模型 ${d.llm.mode}，token ${d.llm.tokens_total}）`+
+      ` <button id="openconsole" class="go" style="padding:4px 10px;margin-left:8px">打开单文件看板</button></div>`;
+    $('#openconsole').onclick=async()=>{
+      try{
+        // /console/<rid> 是浏览器导航，无法带自定义头；改为取回单文件 HTML
+        // 后写入新窗口，保持「零改动看板 + 鉴权头可用」。
+        const rr=await authFetch(d.console_url);
+        if(rr.status===401)throw new Error('未授权：请先填写访问凭据');
+        if(!rr.ok)throw new Error('看板读取失败');
+        const html=await rr.text();
+        const w=window.open('','_blank');
+        if(!w)throw new Error('浏览器拦截了新窗口，请允许弹出窗口');
+        w.document.open();w.document.write(html);w.document.close();
+      }catch(e){$('#msg').innerHTML=`<div class="err">看板打开失败：${e.message}</div>`;}
+    };
     renderRun(d);
+    loadHistory();
   }catch(e){$('#msg').innerHTML=`<div class="err">运行失败：${e.message}</div>`;}
   $('#run').disabled=false;
 };
 async function loadBoard(){
-  const d=await (await fetch('/api/eval')).json();
+  const d=await (await authFetch('/api/eval')).json();
   if(!d.available){$('#board').innerHTML=`<div class="muted">${d.message}</div>`;return;}
   const metrics=[['sla_rate','SLA 达成率',1],['budget_rate','预算达标率',1],
     ['cost_per_gpu_hour','单位成本 元/GPU·h',0],['green_window_ratio','绿电窗口作业占比',1],
@@ -289,6 +388,26 @@ async function loadBoard(){
   });
   $('#board').innerHTML=h;
 }
+// P2-3.2：重启后仍可回溯 runs/ 下已归档的运行（服务端按需从磁盘读取）
+async function loadHistory(){
+  try{
+    const d=await (await authFetch('/api/runs')).json();
+    const runs=(d.runs||[]).slice(0,5);
+    if(!runs.length){$('#hist').textContent='历史运行：暂无归档记录';return;}
+    $('#hist').innerHTML='历史运行（最近 5 次，点击回看轨迹）： '+
+      runs.map(r=>`<a href="#" data-rid="${r.run_id}" style="margin-right:10px">${r.run_id}</a>`).join('');
+    $('#hist').querySelectorAll('a').forEach(a=>a.onclick=async(ev)=>{
+      ev.preventDefault();
+      try{
+        const rr=await authFetch('/api/run/'+a.dataset.rid);
+        const dd=await rr.json();
+        if(!rr.ok)throw new Error(dd.error||'读取失败');
+        renderRun(dd);goPanel('p3');
+      }catch(e){$('#msg').innerHTML=`<div class="err">历史读取失败：${e.message}</div>`;}
+    });
+  }catch(e){$('#hist').textContent='历史运行列表不可用';}
+}
+loadHistory();
 // 深链接：?panel=2&autorun=1 可直接落到某个面板并自动跑一次，方便录屏与截图
 const QS=new URLSearchParams(location.search);
 if(QS.get('panel')) goPanel('p'+QS.get('panel'));
@@ -311,36 +430,71 @@ class Handler(BaseHTTPRequestHandler):
     """
 
     server_version = "GreenCompute/1.0"
+    auth_config = AUTH
 
     def log_message(self, fmt, *args):
-        """覆盖默认实现以静默访问日志：本地演示时避免每帧请求刷满控制台。"""
-        pass
+        """受限访问日志：只记时间 / 来源 / 请求行 / 状态码 / 字节数。
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        鉴权相关：原实现被 pass 掉，导致越权完全不可观测。默认 fmt 不含
+        Authorization 头与请求正文，因此这里不会泄露凭据。
+        """
+        try:
+            msg = fmt % args
+        except Exception:
+            msg = " ".join(str(a) for a in args)
+        sys.stderr.write(
+            f"[{self.log_date_time_string()}] {self.address_string()} {msg}\n")
+
+    def _send(self, code: int, body: bytes, ctype: str,
+              extra: dict[str, str] | None = None) -> None:
         """回复客户端：先发状态行与头，再发正文，确保 Content-Length 准确。
 
         注意：状态行/响应头只能发送一次，重复发送会让 Content-Length 与实际
-        字节数错位，客户端解析必然出错。
+        字节数错位，客户端解析必然出错。extra 用于 401 的 WWW-Authenticate。
         """
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, obj, code: int = 200) -> None:
+    def _json(self, obj, code: int = 200,
+              extra: dict[str, str] | None = None) -> None:
         """以 UTF-8 JSON 回复；中文不转义，便于直接读接口。"""
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
-                   "application/json; charset=utf-8")
+                   "application/json; charset=utf-8", extra=extra)
+
+    def _unauthorized(self, reason: str) -> None:
+        """统一 401：不区分无凭据 / 错误 / 过期 / 未配置，避免凭据探测。"""
+        path = self.path.split("?")[0]
+        sys.stderr.write(f"[AUTH] 401 {self.address_string()} {self.command} "
+                         f"{path} reason={reason}\n")
+        self._json({"error": "未授权：需要有效的访问凭据"}, 401,
+                   extra={"WWW-Authenticate": WWW_AUTHENTICATE})
+
+    def _guard(self, method: str) -> bool:
+        """所有路由的统一入口判定；失败时已自行发出 401。"""
+        path = self.path.split("?")[0]
+        result = self.auth_config.check(self.headers, self.client_address,
+                                        method, path)
+        if result.ok:
+            return True
+        self._unauthorized(result.reason)
+        return False
 
     def do_GET(self) -> None:  # noqa: N802
         """GET 路由：首页、策略列表、评测看板、单次运行结果与看板文件。
 
         所有带运行编号的路由都先过 safe_run_id，非法编号直接 400，
         不合法就根本拼不出路径，这是路径穿越的防线。
+        分级鉴权：写接口、运行轨迹与看板文件过 _guard；公开只读 GET 放行。
         """
+        if not self._guard("GET"):
+            return
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             self._send(200, PAGE.replace("{ver}", PACK.version).encode("utf-8"),
@@ -350,6 +504,8 @@ class Handler(BaseHTTPRequestHandler):
                                       for k, v in POLICIES.items()]})
         elif path == "/api/eval":
             self._json(eval_board())
+        elif path == "/api/runs":
+            self._json({"runs": list_runs()})
         elif path.startswith("/api/run/"):
             rid = safe_run_id(path.rsplit("/", 1)[-1])
             if rid is None:
@@ -357,6 +513,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             with _LOCK:
                 data = _STORE.get(rid)
+            if not data:
+                # 重启后 _STORE 为空，按 P2-3.2 从磁盘按需回读历史产物
+                data = load_run_from_disk(rid)
             if not data:
                 self._json({"error": "未找到该次运行"}, 404)
             else:
@@ -375,19 +534,34 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "未找到的路径"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
-        """POST /api/run：校验作业数（5~300）、种子与策略组后跑一次，返回结果 JSON。"""
+        """POST /api/run：鉴权 + 请求体上限 + 参数校验后跑一次，返回结果 JSON。"""
+        if not self._guard("POST"):
+            return
         if self.path.split("?")[0] != "/api/run":
             self._json({"error": "未找到的路径"}, 404)
             return
         try:
-            n = int(self.headers.get("Content-Length", 0))
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self._json({"error": "Content-Length 不合法"}, 400)
+                return
+            if n < 0 or n > MAX_BODY:
+                # 超限不读取正文，直接关闭连接，避免残留字节污染后续请求
+                self.close_connection = True
+                self._json({"error": f"请求体过大（上限 {MAX_BODY} 字节）"}, 413)
+                return
             body = json.loads(self.rfile.read(n) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("请求体必须是 JSON 对象")
             jobs_n = max(5, min(300, int(body.get("jobs", 60))))
             seed = int(body.get("seed", 20261111))
             key = body.get("policy", "full")
             if key not in POLICIES:
                 raise ValueError(f"未知策略组 {key}")
             self._json(run_once(jobs_n, seed, key))
+        except (ValueError, TypeError) as exc:
+            self._json({"error": f"请求参数不合法：{exc}"}, 400)
         except Exception as exc:
             self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
 
@@ -403,6 +577,17 @@ def main() -> int:
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
     args = ap.parse_args()
+
+    for line in AUTH.startup_messages():
+        print(f"[AUTH] {line}")
+    if not AUTH.may_start:
+        print("[AUTH] 启动中止（fail-closed）：请先执行 "
+              "`python app/auth_tool.py generate` 或 `rotate`，"
+              "或将 GCS_AUTH_MODE 设为 loopback / off（仅限可信本机调试）。")
+        return 2
+    if AUTH.enabled and not AUTH.token_hash:
+        print(f"[AUTH] 当前绑定 {args.host}；未配置凭据时，"
+              "非回环来源的写接口与轨迹接口一律 401。")
 
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
