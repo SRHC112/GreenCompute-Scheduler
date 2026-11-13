@@ -84,7 +84,7 @@ git push && git push origin v0.1.0
 |---|---|---|---|
 | **GCM 浏览器登录**（推荐个人电脑） | 有图形界面的开发机 | 首次 `git push` 时按提示在浏览器完成 GitHub OAuth 授权，凭据由 Windows 凭据管理器保存 | 免手工管理 token；需要可交互桌面 |
 | **Personal Access Token** | 无界面 / CI / 自动化 | GitHub → Settings → Developer settings → Personal access tokens → Fine-grained token，权限勾 `Contents: Read and Write`；推送时用户名填 `SRHC112`、密码填 token | 可脚本化；token 泄露风险高，用后建议设有效期 |
-| **SSH Key** | 长期开发 | `ssh-keygen -t ed25519 -C "1513309191@qq.com"`，把 `~/.ssh/id_ed25519.pub` 加到 GitHub SSH Keys，再执行 `git remote set-url origin git@github.com:SRHC112/GreenCompute-Scheduler.git` | 一次配置长期可用；依赖 22 端口可达 |
+| **SSH Key** | 长期开发 | `ssh-keygen -t ed25519 -C "you@example.com"`，把 `~/.ssh/id_ed25519.pub` 加到 GitHub SSH Keys，再执行 `git remote set-url origin git@github.com:SRHC112/GreenCompute-Scheduler.git` | 一次配置长期可用；依赖 22 端口可达 |
 
 查看当前认证配置：
 

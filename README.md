@@ -200,7 +200,7 @@ python evaluation/run_eval.py
 > ⚠️ 重跑该脚本会**覆盖**上述已提交的评测文件，提交前请确认是否要保留原数据。
 > 六组对照与两份反事实扫描中的独立编排计算默认并行（`ThreadPoolExecutor`，结果按原顺序汇总），
 > 同种子同参数结果与串行**逐行一致**；`python evaluation/run_eval.py --serial` 可做对照验证。
-> `sensitivity.json` / `pareto.json` / `ci_bootstrap.json` / `diff_ci.json` 属作品证据已入库；
+> `sensitivity.json` / `pareto.json` 属作品证据已入库；
 > `trace_fit.json` 与 `evaluation/traces/` 属一次性调参中间产物，不入仓。
 
 ### 3.5 操作台鉴权（静态 Token，零依赖）
@@ -229,7 +229,6 @@ python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
   鉴权层缺配置绝不放行。凭据不进命令行参数、日志、仓库与参赛提交包。
 - **受限访问日志**只记时间 / 来源 / 方法 / 路径 / 状态码，不记 Authorization 头或请求正文；
   `POST /api/run` 请求体上限 1 MiB，超限返回 413。
-- 详见 [docs/需求变更单_GCS-CHG-2026-002.md](docs/需求变更单_GCS-CHG-2026-002.md)。
 
 ### 命令速查
 
@@ -237,8 +236,6 @@ python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
 |---|---|
 | 环境自检 | `python -m unittest discover -s tests -v` |
 | 完整演示 | `python -m gcs.demo --jobs 60 --seed 20261111` |
-| 单组快速调参 | `python evaluation/probe.py` |
-| 缺陷明细排查 | `python evaluation/debug_defects.py` |
 | 对照实验 | `python evaluation/run_eval.py` |
 | 可视化操作台 | `python app/server.py --open` |
 | 生成 / 轮换操作台凭据 | `python app/auth_tool.py generate` / `rotate` |
@@ -340,11 +337,9 @@ GreenCompute-Scheduler/
 │   └── demo.py                    一键演示 CLI
 ├── evaluation/
 │   ├── run_eval.py                六组配置 × 三种子对照实验主脚本（独立编排可并行）
-│   ├── probe.py                   单种子快速对比（调参用）
-│   ├── debug_defects.py           缺陷明细排查
 │   ├── results.csv                逐次原始结果（随作品提交）
 │   ├── summary.md / summary.json  均值 ± 标准差
-│   ├── sensitivity.json / pareto.json / ci_bootstrap.json / diff_ci.json   评测作品证据
+│   ├── sensitivity.json / pareto.json   评测作品证据
 │   └── eval_report.html           对比看板（可直接截图）
 ├── app/
 │   ├── server.py                  零依赖可视化操作台（仅标准库）
@@ -432,20 +427,13 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 | [docs/参数出处.md](docs/参数出处.md) | 每个关键参数的取值、来源与可信度表 |
 | [docs/性能与并发.md](docs/性能与并发.md) | 实测吞吐、并发加速比与可复现性结论 |
 | [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | 第三方依赖与许可声明 |
-| [docs/流程基线符合性记录.md](docs/流程基线符合性记录.md) | 《产品项目研发流程规范》31 项产出物逐项事实对照 |
-| [docs/差异及处理方式记录.md](docs/差异及处理方式记录.md) | 流程口径差异 D-01~D-10、内容规格偏离 S-01~S-08 登记与审批占位 |
-| [docs/分支与合并规范.md](docs/分支与合并规范.md) | 五类分支、合并路径、Code Review 规则与现状过渡方案 |
-| [docs/闭环确认清单.md](docs/闭环确认清单.md) | H/M/L 问题逐项闭环状态与证据来源 |
-| [docs/需求变更单_GCS-CHG-2026-002.md](docs/需求变更单_GCS-CHG-2026-002.md) | 鉴权新增 / 评测口径重算 / FR-12 定性（Q3 唯一基线，待人工签署） |
-| [docs/项目改进实施记录_GCS-CHG-2026-002.md](docs/项目改进实施记录_GCS-CHG-2026-002.md) | P0/P1/P2 逐项落实台账、取舍原因、影响范围与验证结论 |
-| [docs/竞赛要求_2026未来杯_官方原文.md](docs/竞赛要求_2026未来杯_官方原文.md) | 2026 第五届未来杯赛题一官方要求原文（GCS-REQ-CONTEST-2026-001） |
 | [docs/竞赛符合性对照_2026未来杯.md](docs/竞赛符合性对照_2026未来杯.md) | 官方要求逐条对照：硬门槛、初赛必交件、决赛补充与缺口优先级（GCS-CONF-CONTEST-2026-001） |
 | [docs/项目白皮书_初赛.md](docs/项目白皮书_初赛.md) | 赛事「项目白皮书」5 小节：概述 / 解决方案 / 应用成效 / 商业模式 / 团队（GCS-WP-2026-001） |
 | [docs/演示视频脚本_初赛.md](docs/演示视频脚本_初赛.md) | 3 分 40 秒演示视频分镜、旁白逐字稿、录屏命令清单与口径红线 |
 | [docs/SRS_需求规格说明书.md](docs/SRS_需求规格说明书.md) | 自建需求规格说明书 |
 | [docs/RTM_需求追踪矩阵.md](docs/RTM_需求追踪矩阵.md) | 需求追踪矩阵 |
 | [docs/测试计划.md](docs/测试计划.md) / [docs/测试用例.md](docs/测试用例.md) / [docs/测试报告.md](docs/测试报告.md) | 测试三件套 |
-| [docs/验收单.md](docs/验收单.md) / [docs/回滚预案.md](docs/回滚预案.md) / [docs/复盘记录.md](docs/复盘记录.md) | 验收与复盘 |
+| [docs/回滚预案.md](docs/回滚预案.md) | 回滚预案 |
 
 ## 十一、许可与引用
 

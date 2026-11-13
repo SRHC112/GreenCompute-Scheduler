@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .knowledge import KnowledgePack
 
@@ -65,11 +65,6 @@ class JobResult:
     sla_ok: bool
     budget_ok: bool
     green_ok: bool
-
-    @property
-    def ok(self) -> bool:
-        """三项硬约束（SLA / 预算 / 绿电）是否同时满足。"""
-        return self.sla_ok and self.budget_ok and self.green_ok
 
     def as_dict(self) -> dict:
         """转成可 JSON 序列化的字典，浮点数统一保留 4 位小数，避免看板出现长尾小数。"""

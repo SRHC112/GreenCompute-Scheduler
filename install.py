@@ -19,7 +19,7 @@
     python install.py --dir DIR           指定项目目录（脚本不在项目内时自动 clone 到此）
     python install.py --run demo          安装完成后运行（自动加载 .env + 虚拟环境）
     python install.py --run server       启动可视化操作台
-    python install.py --run test / eval / probe
+    python install.py --run test / eval
     python install.py --run -- python -m gcs.demo --policy fcfs
 
 脚本不在项目目录内运行时，会自动 clone 官方仓库到 ./GreenCompute-Scheduler 再安装。
@@ -62,7 +62,6 @@ ALIASES = {
     "server": ["app/server.py", "--open"],
     "test": ["-m", "unittest", "discover", "-s", "tests", "-v"],
     "eval": ["evaluation/run_eval.py"],
-    "probe": ["evaluation/probe.py"],
 }
 
 RUN_BAT = """@echo off
@@ -559,7 +558,7 @@ def resolve_run_cmd(rest: list[str]) -> list[str]:
     key = rest[0].lower()
     if key not in ALIASES:
         raise InstallError(f"未知运行命令：{key}",
-                           "可用：demo / server / test / eval / probe，或用 -- 传入自定义命令。")
+                           "可用：demo / server / test / eval，或用 -- 传入自定义命令。")
     return list(ALIASES[key]) + rest[1:]
 
 

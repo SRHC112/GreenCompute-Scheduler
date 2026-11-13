@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-STATES = ["PARSE", "PLAN", "SCHEDULE", "EXECUTE", "VERIFY", "REFLECT", "REWORK", "REPORT"]
 NODE_TYPES = ("TASK", "DECISION", "CHECK", "HUMAN")
-NODE_STATUS = ("pending", "running", "done", "failed", "skipped")
 
 
 @dataclass

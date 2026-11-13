@@ -101,7 +101,7 @@
 
 ---
 
-## 五、验收标准（与验收单对应）
+## 五、验收标准
 
 - `python -m unittest discover -s tests -v` 全部通过（109 个测试）。
 - `python evaluation\trace_fit.py` 四项硬断言全部通过（电价时段、峰谷比、排放因子、绿电曲线）。

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .knowledge import KnowledgePack
 from .llm import ModelGateway
@@ -269,7 +269,6 @@ class Executor:
     def __init__(self, pack: KnowledgePack):
         """构造执行器：绑定知识包，维护本次运行的重试计数。"""
         self.pack = pack
-        self.retries = 0
 
     def run(self, jobs: list[Job], plan: dict[str, dict], cluster: Cluster
             ) -> tuple[list[JobResult], RunMetrics]:
@@ -280,7 +279,6 @@ class Executor:
         """
         results, metrics = execute(self.pack, cluster, jobs, plan)
         # 执行侧只做“发现异常”，不做判定：判定权在 A5，避免自证
-        self.retries = sum(1 for r in results if not r.sla_ok)
         return results, metrics
 
 
