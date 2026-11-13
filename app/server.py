@@ -67,7 +67,7 @@ def run_once(jobs_n: int, seed: int, policy_key: str) -> dict:
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     out_dir = RUNS_DIR / f"{run_id}_{policy_key}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    render_console(art, PACK.version, out_dir / "console.html")
+    render_console(art, PACK.fingerprint(), out_dir / "console.html")
     (out_dir / "artifact.json").write_text(
         json.dumps(art.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     (out_dir / "metrics.json").write_text(
@@ -333,7 +333,7 @@ function renderRun(d){
     ['单位算力成本','¥'+m.cost_per_gpu_hour.toFixed(2),'元 / GPU·h','o'],
     ['平均绿电占比',(m.avg_green_share*100).toFixed(1)+'%','作业时段加权','g'],
     ['平均排队',m.avg_wait_min.toFixed(0)+' min','P95 '+m.p95_wait_min.toFixed(0)+' min',''],
-    ['返工轮次',String(d.rounds),'rubric '+(d.rubric?d.rubric.score:'-')+' / 80','o']];
+    ['返工轮次',String(d.rounds),'rubric '+(d.rubric?d.rubric.score:'-')+' / '+(d.rubric&&d.rubric.threshold!=null?d.rubric.threshold:'-'),'o']];
   $('#kpis').innerHTML=k.map(x=>`<div class="kpi ${x[3]}"><div class="l">${x[0]}</div><div class="v">${x[1]}</div><div class="s">${x[2]}</div></div>`).join('');
   $('#narr').textContent='运行摘要：'+d.narrative;
   drawDag(d.dag);
@@ -563,7 +563,12 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError) as exc:
             self._json({"error": f"请求参数不合法：{exc}"}, 400)
         except Exception as exc:
-            self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
+            # F1 加固：不向客户端回显内部异常类型/信息（防信息泄露），
+            # 仅在服务端 stderr 记录完整异常，兼顾可观测性与安全性。
+            sys.stderr.write(
+                f"[ERROR] 未捕获异常 {self.command} {self.path.split('?')[0]}："
+                f"{type(exc).__name__}: {exc}\n")
+            self._json({"error": "服务内部错误，请稍后重试"}, 500)
 
 
 def main() -> int:

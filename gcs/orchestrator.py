@@ -30,7 +30,7 @@ class Policy:
     name: str = "G-D 本方案"
     weights_mode: str = "knowledge"      # knowledge | uniform | no_green
     candidate_mode: str = "full"         # full | earliest
-    max_rounds: int = 2
+    max_rounds: int | None = None      # None 时回落知识包 rework_budget.max_rounds（唯一调参入口，避免双源漂移）
     rule: str | None = None              # None | fcfs | sjf
     with_evidence: bool = True
     green_scale: float = 1.0             # 绿电/碳排权重倍率，1.0 为知识包原值
@@ -178,8 +178,11 @@ class Orchestrator:
         rubric_history: list[Decision] = []
         defect_history: list[dict] = []
         rounds = 0
+        # D03：轮数上限以知识包为唯一源；Policy.max_rounds 仅在对照组显式覆盖时非 None。
+        max_rounds = (self.policy.max_rounds if self.policy.max_rounds is not None
+                      else int(self.pack.rework_budget["max_rounds"]))
 
-        for rnd in range(self.policy.max_rounds + 1):
+        for rnd in range(max_rounds + 1):
             # ---------------- SCHEDULE ----------------
             if self.policy.rule:
                 plan = self._rule_plan(jobs, estimates, cluster)
@@ -230,8 +233,8 @@ class Orchestrator:
             rounds = rnd + 1
             if decision.passed or self.policy.rule:
                 break
-            if rnd >= self.policy.max_rounds or not decision.jobs_to_rework:
-                reason = "轮次预算耗尽" if rnd >= self.policy.max_rounds else "已无可返工作业"
+            if rnd >= max_rounds or not decision.jobs_to_rework:
+                reason = "轮次预算耗尽" if rnd >= max_rounds else "已无可返工作业"
                 nodes = ",".join(decision.target_nodes) or "无"
                 self._emit(
                     "REFLECT", "n_reflect", "A6",

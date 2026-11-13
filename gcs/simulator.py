@@ -128,6 +128,10 @@ class Cluster:
         把每条占用区间截断到 [start, end] 后生成 +g/-g 事件，排序一次即得
         窗口内峰值占用，O(n log n)，与原来的逐段半开区间检查语义等价。
         """
+        # F3 加固：拒绝非正时长/GPU 数。否则反向窗口(时长≤0)不产生扫描事件会被
+        # “无条件判可行”，负 gpus 的作业也会被正常排入计划并污染指标。
+        if duration <= 0 or gpus <= 0:
+            return False
         cap = self.pack.pool(pool_id).gpus
         end = start + duration
         if start < 0 or end > self.horizon_min or gpus > cap:

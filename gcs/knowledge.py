@@ -153,6 +153,10 @@ class KnowledgePack:
                 errors.append(f"{p.id} 电价缺少峰/平/谷任一档")
             if p.gpus <= 0 or p.pue < 1.0:
                 errors.append(f"{p.id} 的 gpus/pue 取值不合理")
+        # F2 加固：电网碳排因子为正的物理量，负值会让 carbon_norm 归一化分母被
+        # max(1e-6, …) 兜底成 1e-6，使碳排目标项爆量并反向优化，必须在加载期拒绝。
+        if self.grid_carbon_factor < 0:
+            errors.append(f"grid_carbon_factor 不能为负（收到 {self.grid_carbon_factor}）")
         for name, prof in self.job_profiles.items():
             if abs(prof.weight_sum() - 1.0) > 1e-6:
                 errors.append(f"作业类型 {name} 的目标权重之和为 {prof.weight_sum()}，应为 1")
