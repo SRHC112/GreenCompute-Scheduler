@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
 import statistics
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,8 +56,28 @@ FIELDS = ["group", "group_name", "seed", "jobs", "sla_rate", "budget_rate", "gre
           "avg_wait_min", "p95_wait_min", "cost_per_gpu_hour", "avg_green_share",
           "green_window_ratio", "total_carbon_kg", "rounds", "rubric_score", "tokens"]
 
+WORKERS = min(6, max(1, os.cpu_count() or 1))
 
-def run_all(outdir: Path, jobs_n: int) -> list[dict]:
+
+def parallel_map_ordered(fn, items, workers: int = 0) -> list:
+    """把相互独立的编排计算并行执行，但严格按输入顺序返回结果。
+
+    P1-2.4：每个任务自建 ``Orchestrator`` / ``ModelGateway``，只读共享知识包
+    与作业流；``ThreadPoolExecutor.map`` 按输入顺序产出，因此「同种子同参数
+    必得完全相同指标」的可复现根基不受线程调度影响。workers<=0 用默认并行度，
+    workers==1 或 --serial 时退化为串行，用于对照验证。
+    """
+    seq = list(items)
+    if not seq:
+        return []
+    w = workers or WORKERS
+    if w <= 1 or len(seq) == 1:
+        return [fn(x) for x in seq]
+    with ThreadPoolExecutor(max_workers=min(w, len(seq))) as pool:
+        return list(pool.map(fn, seq))
+
+
+def run_all(outdir: Path, jobs_n: int, workers: int = 0) -> list[dict]:
     """跑完 6 个对照组 × 3 个固定种子，逐次记录指标并落盘，返回原始行。
 
     同一份作业流喂给所有组：对照组之间唯一的差异是 Policy 开关，
@@ -67,28 +89,39 @@ def run_all(outdir: Path, jobs_n: int) -> list[dict]:
 
     rows: list[dict] = []
     outdir.mkdir(parents=True, exist_ok=True)
+    # 先把 6 组 × 3 种子展开成彼此独立、只读共享作业流的任务，再并行计算；
+    # 结果按 (seed, GROUPS 顺序) 原序回填，rows 顺序与串行实现完全一致。
+    tasks = []
     for seed in SEEDS_FIXED:
         jobs = make_jobs(pack, n=jobs_n, seed=seed)
         for code, name, key, _desc in GROUPS:
-            # 每次运行用独立网关，token 计数按组归集，不跨组串账
-            art = Orchestrator(pack, llm=ModelGateway(), policy=POLICIES[key]).run(jobs)
-            m = art.metrics.as_dict()
-            rows.append({
-                "group": code, "group_name": name,
-                "seed": seed, "jobs": m["jobs"],
-                "sla_rate": m["sla_rate"], "budget_rate": m["budget_rate"],
-                "green_ok_rate": m["green_ok_rate"], "avg_wait_min": m["avg_wait_min"],
-                "p95_wait_min": m["p95_wait_min"],
-                "cost_per_gpu_hour": m["cost_per_gpu_hour"],
-                "avg_green_share": m["avg_green_share"],
-                "green_window_ratio": m["green_window_ratio"],
-                "total_carbon_kg": m["total_carbon_kg"], "rounds": art.rounds,
-                "rubric_score": art.rubric_history[-1].score if art.rubric_history else 0,
-                "tokens": art.llm.get("tokens_total", 0),
-            })
-            print(f"{code:<5} seed={seed:<9} sla={m['sla_rate']:.1%} "
-                  f"cost={m['cost_per_gpu_hour']:.2f} green_win={m['green_window_ratio']:.1%} "
-                  f"rounds={art.rounds} rubric={rows[-1]['rubric_score']}")
+            tasks.append((seed, jobs, code, name, key))
+
+    def one(task) -> dict:
+        seed, jobs, code, name, key = task
+        # 每次运行用独立网关，token 计数按组归集，不跨组串账
+        art = Orchestrator(pack, llm=ModelGateway(), policy=POLICIES[key]).run(jobs)
+        m = art.metrics.as_dict()
+        return {
+            "group": code, "group_name": name,
+            "seed": seed, "jobs": m["jobs"],
+            "sla_rate": m["sla_rate"], "budget_rate": m["budget_rate"],
+            "green_ok_rate": m["green_ok_rate"], "avg_wait_min": m["avg_wait_min"],
+            "p95_wait_min": m["p95_wait_min"],
+            "cost_per_gpu_hour": m["cost_per_gpu_hour"],
+            "avg_green_share": m["avg_green_share"],
+            "green_window_ratio": m["green_window_ratio"],
+            "total_carbon_kg": m["total_carbon_kg"], "rounds": art.rounds,
+            "rubric_score": art.rubric_history[-1].score if art.rubric_history else 0,
+            "tokens": art.llm.get("tokens_total", 0),
+        }
+
+    for row in parallel_map_ordered(one, tasks, workers=workers):
+        rows.append(row)
+        print(f"{row['group']:<5} seed={row['seed']:<9} sla={row['sla_rate']:.1%} "
+              f"cost={row['cost_per_gpu_hour']:.2f} "
+              f"green_win={row['green_window_ratio']:.1%} "
+              f"rounds={row['rounds']} rubric={row['rubric_score']}")
     return rows
 
 
@@ -217,7 +250,8 @@ def bootstrap_diff(rows: list[dict], n_boot: int = 200, seed: int = 20261111,
 
 
 def run_sensitivity(pack: KnowledgePack, jobs_n: int = JOBS,
-                    seeds: list[int] | None = None) -> dict:
+                    seeds: list[int] | None = None,
+                    workers: int = 0) -> dict:
     """两个开关的真实重跑：返工阈值与绿电权重。
 
     不是「按经验估算」，而是把同一批作业流拿去做参数扫描，读引擎终态指标；
@@ -250,7 +284,8 @@ def run_sensitivity(pack: KnowledgePack, jobs_n: int = JOBS,
 
     def run(policy, threshold=None) -> dict:
         """对全部固定种子各跑一次并取均值，作为该参数取值下的代表结果。"""
-        per_seed = [one(policy, jobs, threshold) for _s, jobs in streams]
+        per_seed = parallel_map_ordered(
+            lambda sj: one(policy, sj[1], threshold), streams, workers=workers)
         return {k: statistics.mean(float(r[k]) for r in per_seed) for k in per_seed[0]}
 
     thresholds = [60, 70, 80, 90, 95]
@@ -316,7 +351,8 @@ def diff_lines(diff: dict) -> list[str]:
 
 
 def run_pareto(pack: KnowledgePack, jobs_n: int = JOBS,
-               seeds: list[int] | None = None) -> dict:
+               seeds: list[int] | None = None,
+               workers: int = 0) -> dict:
     """排队—成本帕累托前沿：只放大「排队」权重，看能把等待压到什么程度、代价是多少。
 
     这不是又一组对照组，而是对同一个方案做反事实扫描：约束不变、数据不变，
@@ -329,14 +365,17 @@ def run_pareto(pack: KnowledgePack, jobs_n: int = JOBS,
     streams = [(s, make_jobs(pack, n=jobs_n, seed=s)) for s in seeds]
     base = POLICIES["full"]
     rows = []
+
+    def scan(kk, jobs) -> tuple:
+        art = Orchestrator(pack, llm=ModelGateway(),
+                           policy=replace(base, wait_scale=kk)).run(jobs)
+        m = art.metrics
+        return (m.avg_wait_min, m.cost_per_gpu_hour,
+                m.green_window_ratio, m.sla_rate)
+
     for k in (0.5, 1.0, 2.0, 4.0, 8.0, 16.0):
-        per = []
-        for _s, jobs in streams:
-            art = Orchestrator(pack, llm=ModelGateway(),
-                               policy=replace(base, wait_scale=k)).run(jobs)
-            m = art.metrics
-            per.append((m.avg_wait_min, m.cost_per_gpu_hour,
-                        m.green_window_ratio, m.sla_rate))
+        per = parallel_map_ordered(
+            lambda sj, kk=k: scan(kk, sj[1]), streams, workers=workers)
         rows.append({
             "wait_scale": k,
             "avg_wait_min": statistics.mean(x[0] for x in per),
@@ -652,23 +691,28 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default=str(ROOT / "evaluation"))
     p.add_argument("--jobs", type=int, default=JOBS)
+    p.add_argument("--workers", type=int, default=0,
+                   help="并行度（0=自动，1=串行）；--serial 等价于 --workers 1")
+    p.add_argument("--serial", action="store_true",
+                   help="强制串行执行，用于与并行结果做逐行一致性对照")
     args = p.parse_args()
+    workers = 1 if args.serial else args.workers
 
     outdir = Path(args.outdir)
     pack = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
 
-    rows = run_all(outdir, jobs_n=args.jobs)
+    rows = run_all(outdir, jobs_n=args.jobs, workers=workers)
     write_csv(rows, outdir / "results.csv")
 
     stats = aggregate(rows)
 
     print("\n参数扫描：返工阈值 / 绿电权重 ...")
-    sens = run_sensitivity(pack, jobs_n=args.jobs)
+    sens = run_sensitivity(pack, jobs_n=args.jobs, workers=workers)
     with (outdir / "sensitivity.json").open("w", encoding="utf-8") as f:
         json.dump(sens, f, ensure_ascii=False, indent=2)
 
     print("帕累托扫描：排队权重 0.5~16 倍 ...")
-    pareto = run_pareto(pack, jobs_n=args.jobs)
+    pareto = run_pareto(pack, jobs_n=args.jobs, workers=workers)
     with (outdir / "pareto.json").open("w", encoding="utf-8") as f:
         json.dump(pareto, f, ensure_ascii=False, indent=2)
 

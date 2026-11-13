@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from .knowledge import KnowledgePack
 from .llm import ModelGateway
-from .simulator import HORIZON_MIN, Cluster, Job, JobResult, RunMetrics, execute
+from .simulator import Cluster, Job, JobResult, RunMetrics, execute
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,7 @@ class Scheduler:
         anchors = [h * 60 for h in valley] + [(h + 1) * 60 for h in peak]
         for a in sorted(anchors):
             t = a if a >= job.arrive_min else a + 24 * 60
-            if t + duration <= HORIZON_MIN:
+            if t + duration <= cluster.horizon_min:
                 starts.add(t)
         return sorted(starts)
 
@@ -206,19 +206,29 @@ class Scheduler:
         cost = energy * price + job.gpus * duration / 60 * pool.amort_per_gpu_hour
         green = self.pack.green_at(start + duration // 2)
         carbon = energy * (1 - green) * self.pack.grid_carbon_factor
+        # P1-2.6：碳排分项不再复用 (1-green)。基准取「同一作业落在能耗最高的
+        # 资源池、且完全无绿电」时的碳排量，于是
+        #   carbon_norm = (1-green) × (本池 功耗×PUE / 最高 功耗×PUE) ∈ [0,1]
+        # 既保留绿电时段的贡献，又把「选高 PUE 池 → 能耗高 → 碳排高」的
+        # 链路真正接进目标函数（原实现两个分项同值，资源池能耗差异被抹平）。
+        max_power = max(p.gpu_power_kw * p.pue for p in self.pack.pools)
+        carbon_ref = (job.gpus * duration / 60 * max_power
+                      * self.pack.grid_carbon_factor)
+        carbon_norm = carbon / max(1e-6, carbon_ref)
         wait = max(0, start - job.arrive_min)
         window = max(1, job.deadline_min - job.arrive_min)
         congestion = self._congestion(cluster, pool_id, start, duration)
         j = (w["wait"] * min(1.5, wait / window)
              + w["cost"] * (cost / max(1e-6, job.budget))
              + w["green"] * (1 - green)
-             + w["carbon"] * (1 - green)
+             + w["carbon"] * carbon_norm
              + w["reliability"] * congestion)
         return {
             "job_id": job.id, "pool_id": pool_id, "start_min": start,
             "duration_min": duration, "cost_est": round(cost, 2),
             "energy_kwh": round(energy, 2), "green_share": round(green, 3),
-            "carbon_kg": round(carbon, 3), "segment": segment,
+            "carbon_kg": round(carbon, 3), "carbon_norm": round(carbon_norm, 4),
+            "segment": segment,
             "congestion": round(congestion, 3), "score": round(j, 5),
         }
 
