@@ -64,7 +64,7 @@ python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 ```
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
-→ 跑 74 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 跑 109 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
 → 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
 
 **唯一的一次交互确认**
@@ -144,7 +144,7 @@ python -c "import yaml; print('PyYAML', yaml.__version__)"
 python -m unittest discover -s tests -v
 ```
 
-预期输出：`Ran 74 tests ... OK`，实测耗时约 2 秒（Python 3.13 / Windows）。
+预期输出：`Ran 109 tests ... OK`，实测耗时约 3 秒（Python 3.13 / Windows）。
 
 ### 3.2 一键完整编排（核心演示）
 
@@ -198,6 +198,38 @@ python evaluation/run_eval.py
 
 > `runs/` 已被 `.gitignore` 忽略，运行产物不入库；`evaluation/` 下的评测结果作为作品证据随仓库提交。
 > ⚠️ 重跑该脚本会**覆盖**上述已提交的评测文件，提交前请确认是否要保留原数据。
+> 六组对照与两份反事实扫描中的独立编排计算默认并行（`ThreadPoolExecutor`，结果按原顺序汇总），
+> 同种子同参数结果与串行**逐行一致**；`python evaluation/run_eval.py --serial` 可做对照验证。
+> `sensitivity.json` / `pareto.json` / `ci_bootstrap.json` / `diff_ci.json` 属作品证据已入库；
+> `trace_fit.json` 与 `evaluation/traces/` 属一次性调参中间产物，不入仓。
+
+### 3.5 操作台鉴权（静态 Token，零依赖）
+
+操作台默认 `GCS_AUTH_MODE=loopback`：本机回环访问免凭据，一旦 `--host` 对外暴露，
+写接口与含运行轨迹的读接口自动要求 Bearer Token。**分级鉴权**：
+
+| 接口 | 是否需要凭据 |
+|---|---|
+| `GET /`、`/api/policies`、`/api/eval`、`/api/runs` | 否（公开只读；CI 探测、录屏深链接、作品证据展示不受影响） |
+| `POST /api/run`、`GET /api/run/<rid>`、`GET /console/<rid>` | 是 |
+
+凭据生成与轮换（明文只显示一次，`.env` 里只存 salted sha256 派生值）：
+
+```bash
+python app/auth_tool.py generate    # 首次生成
+python app/auth_tool.py rotate      # 轮换，旧凭据保留 24 小时窗口
+python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
+```
+
+- **浏览器**：操作台页首「访问凭据」输入框粘贴（只存 `sessionStorage`，不进 URL / 日志）。
+- **命令行**：`curl -H "Authorization: Bearer <凭据>" -X POST ...`。
+- **三态**：`off`（仅故障回退）/ `loopback`（默认）/ `required`（一律要求凭据）。
+  `required` 下缺凭据或凭据超过 90 天会**拒绝启动**（fail-closed）；`loopback` 仅告警。
+- **独立命名空间** `GCS_AUTH_*`，不复用 `GCS_LLM_*`：模型层缺 Key 是离线降级，
+  鉴权层缺配置绝不放行。凭据不进命令行参数、日志、仓库与参赛提交包。
+- **受限访问日志**只记时间 / 来源 / 方法 / 路径 / 状态码，不记 Authorization 头或请求正文；
+  `POST /api/run` 请求体上限 1 MiB，超限返回 413。
+- 详见 [docs/需求变更单_GCS-CHG-2026-002.md](docs/需求变更单_GCS-CHG-2026-002.md)。
 
 ### 命令速查
 
@@ -209,15 +241,21 @@ python evaluation/run_eval.py
 | 缺陷明细排查 | `python evaluation/debug_defects.py` |
 | 对照实验 | `python evaluation/run_eval.py` |
 | 可视化操作台 | `python app/server.py --open` |
+| 生成 / 轮换操作台凭据 | `python app/auth_tool.py generate` / `rotate` |
+| 查看鉴权状态 | `python app/auth_tool.py status` |
+| 评测串行对照 | `python evaluation/run_eval.py --serial` |
 
 ---
 
 ## 四、验证清单（如何确认跑对了）
 
-1. `python -m unittest discover -s tests -v` → **74 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
+1. `python -m unittest discover -s tests -v` → **109 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
-4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行。
+4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行；
+   `--serial` 重跑的 `results.csv` 与并行结果逐行一致。
+5. `python app/auth_tool.py status` 显示鉴权模式与凭据状态；`required` 模式下
+   `POST /api/run` 无凭据返回 401、正确凭据返回 200（`tests/test_server.py` 已覆盖）。
 
 ### 4.1 GitHub Actions 自动验证
 
@@ -230,6 +268,7 @@ python evaluation/run_eval.py
 
 看板与评测报告会作为 Artifact 上传，分别保留 7 / 14 天，可在 Actions 运行页下载。
 CI 使用的命令与本文第三、四节完全一致，因此**本地能跑通 ≈ CI 能跑通**；工作流细节与常见坑见 [docs/DEPLOY.md](docs/DEPLOY.md) 第十节。
+鉴权默认 `loopback` 且公开只读 GET 在任意模式都放行，因此 CI 的 `curl -fsS /` 探测无需携带凭据，**工作流零改动**。
 
 ---
 
@@ -273,8 +312,10 @@ python -m gcs.demo --jobs 60
   注入即可接管全部在线请求（不同 API 方言 / 自建代理 / mock 测试），预算、降级与记账逻辑不受影响；
 - `gateway.stats()` 额外返回 `model_lite` / `adapter` / `tier_stats`（分层模型与 token 用量）。
 
-> **安全提示**：密钥只通过环境变量传入，**代码不会自动加载 `.env`**，绝不要写进源码或提交到仓库；
+> **安全提示**：模型密钥只通过环境变量传入，**模型网关不会自动加载 `.env`**，绝不要写进源码或提交到仓库；
 > `.env` / `.env.local` 已在 `.gitignore` 中排除。
+> 操作台鉴权会读取 `.env` 中的 `GCS_AUTH_*`（系统环境变量优先、文件只补缺），只取 salted sha256 派生值，
+> **不会把 `GCS_LLM_*` 注入进程环境**——直接运行 `app/server.py` 时模型网关仍只按环境变量判定在线/离线。
 > **设计纪律**：所有指标数字由确定性模块计算，模型只产出叙述性文本；
 > 模型不可用时自动降级并继续运行，不影响评测得分数值。
 
@@ -298,21 +339,26 @@ GreenCompute-Scheduler/
 │   ├── report.py                  单文件零依赖看板 console.html + Markdown 报告
 │   └── demo.py                    一键演示 CLI
 ├── evaluation/
-│   ├── run_eval.py                六组配置 × 三种子对照实验主脚本
+│   ├── run_eval.py                六组配置 × 三种子对照实验主脚本（独立编排可并行）
 │   ├── probe.py                   单种子快速对比（调参用）
 │   ├── debug_defects.py           缺陷明细排查
 │   ├── results.csv                逐次原始结果（随作品提交）
 │   ├── summary.md / summary.json  均值 ± 标准差
+│   ├── sensitivity.json / pareto.json / ci_bootstrap.json / diff_ci.json   评测作品证据
 │   └── eval_report.html           对比看板（可直接截图）
 ├── app/
-│   └── server.py                  零依赖可视化操作台（仅标准库）
-├── tests/                         单元测试合计 74 个
+│   ├── server.py                  零依赖可视化操作台（仅标准库）
+│   ├── auth.py                    静态 Token 分级鉴权（仅标准库、fail-closed）
+│   └── auth_tool.py               凭据生成 / 轮换 / 状态 CLI
+├── tests/                         单元测试合计 109 个
 │   ├── test_smoke.py              12 个冒烟测试（知识包 / 确定性 / 编排收敛 / 指标有限性）
 │   ├── test_verifier.py           12 个五层验证器用例
 │   ├── test_reflect.py            11 个自省 rubric / 归因 / 返工用例
 │   ├── test_report.py             11 个看板与报告产物用例
 │   ├── test_pareto.py             5 个 Pareto 权重缩放用例
-│   └── test_llm.py                23 个模型网关用例（离线降级 / 预算 / 路由 / 适配器）
+│   ├── test_llm.py                23 个模型网关用例（离线降级 / 预算 / 路由 / 适配器）
+│   ├── test_auth.py               20 个鉴权核心用例（三态 / fail-closed / 过期 / 轮换 / 凭据工具）
+│   └── test_server.py             15 个操作台异常边界与鉴权集成用例
 ├── docs/
 │   ├── 架构说明.md                 架构与关键设计说明
 │   ├── DEPLOY.md                  Git 部署/推送流程与排障
@@ -359,7 +405,7 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 评测脚本除六组对照外，还输出两份反事实扫描（都在 `evaluation/summary.md` 里）：
 
 - **参数敏感性**：返工阈值 60/70/80/90/95、绿电权重 0/15/35/60%，用于回答「结论是不是调参调出来的」；
-- **排队—成本帕累托前沿**：只放大排队权重、约束与数据不变，回答「平均排队从 13.8 分钟降到 0.4 分钟，这个代价值不值、能不能换回来」。
+- **排队—成本帕累托前沿**：只放大排队权重、约束与数据不变，回答「平均排队从 12.4 分钟降到 0.8 分钟，这个代价值不值、能不能换回来」。
 
 结论的措辞纪律：置信区间跨 0 的指标一律只写“方向性”，不写成确定性收益。
 
@@ -368,7 +414,7 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 | 机制 | 做法 | 带来什么 |
 |---|---|---|
 | 领域知识包 | 电价/绿电/资源池/作业画像全部外置并版本化 | 代码里没有任何「经验常数」，可审计、可替换 |
-| 显式目标函数 | J = w_wait·等待 + w_cost·成本 + w_green·绿电 + w_carbon·碳排 + w_rel·拥塞 | 权衡是**算出来的**不是拍脑袋的 |
+| 显式目标函数 | J = w_wait·等待 + w_cost·成本 + w_green·绿电 + w_carbon·**归一化碳排** + w_rel·拥塞 | 权衡是**算出来的**；碳排分项按「同作业在最高能耗池、零绿电」归一化，同时反映绿电时段与资源池 PUE/功耗差异 |
 | 硬约束优先 | 截止时间不满足的候选直接出局，无解才退化 | SLA 不与成本做加权折中 |
 | 五层验证 | 结构/数值/约束/可达性/语义，能用规则判的不给模型判 | 缺陷可复算、可归因 |
 | 定向返工 | 缺陷带 owner+node，只重跑责任子树 | 返工不是整链重跑，轮次与成本可控 |
@@ -390,6 +436,8 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 | [docs/差异及处理方式记录.md](docs/差异及处理方式记录.md) | 流程口径差异 D-01~D-10、内容规格偏离 S-01~S-08 登记与审批占位 |
 | [docs/分支与合并规范.md](docs/分支与合并规范.md) | 五类分支、合并路径、Code Review 规则与现状过渡方案 |
 | [docs/闭环确认清单.md](docs/闭环确认清单.md) | H/M/L 问题逐项闭环状态与证据来源 |
+| [docs/需求变更单_GCS-CHG-2026-002.md](docs/需求变更单_GCS-CHG-2026-002.md) | 鉴权新增 / 评测口径重算 / FR-12 定性（Q3 唯一基线，待人工签署） |
+| [docs/项目改进实施记录_GCS-CHG-2026-002.md](docs/项目改进实施记录_GCS-CHG-2026-002.md) | P0/P1/P2 逐项落实台账、取舍原因、影响范围与验证结论 |
 | [docs/竞赛要求_2026未来杯_官方原文.md](docs/竞赛要求_2026未来杯_官方原文.md) | 2026 第五届未来杯赛题一官方要求原文（GCS-REQ-CONTEST-2026-001） |
 | [docs/竞赛符合性对照_2026未来杯.md](docs/竞赛符合性对照_2026未来杯.md) | 官方要求逐条对照：硬门槛、初赛必交件、决赛补充与缺口优先级（GCS-CONF-CONTEST-2026-001） |
 | [docs/项目白皮书_初赛.md](docs/项目白皮书_初赛.md) | 赛事「项目白皮书」5 小节：概述 / 解决方案 / 应用成效 / 商业模式 / 团队（GCS-WP-2026-001） |

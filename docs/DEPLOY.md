@@ -182,7 +182,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 - [ ] `git ls-remote origin main` 返回的 commit 与本地 `git rev-parse HEAD` 一致；
 - [ ] GitHub 网页端 README 正常渲染，`LICENSE` 显示为 Apache-2.0；
 - [ ] 仓库中不存在 `.env`、`__pycache__`、`runs/run_*`；
-- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，74 个单元测试全绿（其中 12 个为冒烟测试）。
+- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，109 个单元测试全绿（其中 12 个为冒烟测试）。
 
 ---
 
@@ -198,7 +198,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 | `test` job | Ubuntu × Python 3.10/3.11/3.12/3.13，另加 Windows × Python 3.13 |
 | `evaluation` job | Ubuntu × Python 3.13，跑六组对照实验并校验结果完整性 |
 
-**检查项**：`compileall` 语法检查 → 单元测试（全量，74 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
+**检查项**：`compileall` 语法检查 → 单元测试（全量，109 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
 
 **查看结果**：仓库首页 Actions 标签页，或 README 顶部的 CI 徽章。失败的 Artifact 仍会上传，便于下载 `console.html` / `results.csv` 定位问题。
 
@@ -240,3 +240,37 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 4. 安装校验阶段强制剥离 `GCS_LLM_*` 环境变量，避免误触发真实模型调用；配置只校验「能否被 ModelGateway 读到」，不发起网络请求、不消耗额度。
 5. 生成的 `run.bat` / `run.sh` 不入仓，换机器后重新运行一次安装脚本即可再生成。
 6. Key 只写进被忽略的 `.env`（Unix 下权限 600）；选择「不接入」时连 `.env` 都不创建。
+
+---
+
+## 十二、操作台鉴权（GCS-CHG-2026-002）
+
+**能力边界**：只作用于 `app/server.py` 的 HTTP 接口；CLI（`gcs.demo`/`gcs.replay`）、评测脚本、安装脚本、看板静态导出不受影响。不引入任何第三方依赖（纯标准库），与 SRS 3.5 零依赖约束兼容。
+
+| 配置项 | 取值 | 说明 |
+|---|---|---|
+| `GCS_AUTH_MODE` | `off` / `loopback`（默认）/ `required` | `off`：完全关闭；`loopback`：本机回环来源免凭据，非回环需 Token；`required`：一律需 Token（公开只读 GET 仍放行） |
+| `GCS_AUTH_TOKEN_HASH` | `salt$sha256hex` 格式 | 由 `python app/auth_tool.py generate` 生成；服务端只存哈希、不存明文，`hmac.compare_digest` 常量时间比对 |
+| `GCS_AUTH_TOKEN_PREV_HASH` | 同上，可选 | 双凭据轮换：旧凭据派生值，配合 `GCS_AUTH_PREV_VALID_UNTIL`（截止时间，`rotate` 自动写入，默认 24 小时窗口）平滑过渡 |
+| `GCS_AUTH_ISSUED_AT` | ISO 8601 日期 | 签发时间（由工具写入），用于 90 天过期判定：`loopback` 模式过期仅告警、`required` 模式过期拒绝启动（fail-closed） |
+| `GCS_AUTH_MAX_AGE_DAYS` | 整数，默认 90 | 过期阈值天数 |
+
+**分级规则**：需鉴权接口 = `POST /api/run`（触发编排+写盘+可能消耗 LLM 预算）、`GET /api/run/<rid>`（运行详情）、`GET /console/<rid>`（看板）；公开接口 = `/`、`/api/policies`、`/api/eval`（CI 的 `curl -fsS /` 探测、`?autorun=1` 深链接、评委免凭据浏览评测看板均不受影响）。
+
+**快速启用**（命令与 README 第四节一致）：
+
+```bash
+python app/auth_tool.py generate        # 首次生成 Token + 哈希（明文只显示一次；--force 覆盖）
+python app/auth_tool.py rotate          # 轮换：旧哈希挪入 _PREV_HASH，--hours 可调窗口（默认 24）
+python app/auth_tool.py status          # 查看模式 / 签发时间 / 过期状态（只读）
+# 工具会直接把 GCS_AUTH_* 写入 .env（已被 .gitignore 排除），随后启动
+python app/server.py
+```
+
+**运行时行为**：鉴权失败统一回 `401 {"error":"unauthorized"}`（不区分无凭据/错凭据/过期，防探测）；请求体超 1 MiB 回 `413`；启动横幅打印当前模式与凭据状态（不打印明文）；访问日志恢复为「时间/来源 IP/方法/路径/状态码」，**绝不记录 Authorization 头或请求正文**。
+
+**安全注意**：
+1. Token 明文只出现在生成时的一次性输出，勿存明文到任何文件；`.env` 已被 `.gitignore` 排除。
+2. `loopback` 判定基于 `client_address`；若部署在反向代理/Docker 网桥后，代理会把来源改写为回环地址导致误放行——对外部署请直接用 `required`。
+3. 静态 Token 方案（Bearer Header）的传输安全依赖 HTTPS；本仓库不提供 TLS，**HTTP 明文形态仅限本机回环或可信内网使用**，公网暴露需自行加反代 TLS。
+4. 失败限流与多用户 RBAC 列入 V2.0（见变更单 001 延期清单）。
