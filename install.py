@@ -351,20 +351,31 @@ def precheck(root: Path) -> None:
             "请确认下载的是完整源码（而非单个文件），或重新 clone 仓库。",
         )
     # 知识包只做「语法 + 顶层结构」预检（不 import 项目模块，避免与安装脚本耦合）：
-    # 语法错误应在这里暴露，而不是等首次运行才失败
+    # 语法错误应在这里暴露，而不是等首次运行才失败。
+    #
+    # 但「系统 Python 未装 PyYAML」是全新机器的常态，不能把它报成「知识包解析失败」
+    # ——那会把「依赖未装」误导成「配置文件写坏了」，用户会去改 YAML 而问题在依赖。
+    # 因此这里把两种情况分开：缺依赖 → 跳过并明确说明；YAML 真坏 → 报解析失败。
+    # 完整安装路径下，知识包仍会被校验：venv 装好依赖后 verify_install() 跑单测，
+    # 单测会加载知识包，等价校验不会丢失（只是推迟到依赖就绪之后）。
     kb = root / "knowledge" / "ningxia_cluster.yaml"
     if kb.is_file():
         try:
-            import yaml  # 运行时依赖预检已确认 PyYAML 可用
-            data = yaml.safe_load(kb.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("知识包根节点必须是映射（键值对）")
-        except Exception as exc:
-            raise InstallError(
-                f"知识包解析失败：{type(exc).__name__}: {exc}",
-                "请检查 knowledge/ningxia_cluster.yaml 的 YAML 语法与顶层结构；"
-                "也可先执行 python -m gcs.demo --jobs 5（冒烟演示）确认知识包可正常加载。",
-            ) from exc
+            import yaml  # noqa: F401  （仅探测可用性；解析在 else 分支）
+        except ImportError:
+            skip("知识包语法预检：当前解释器未安装 PyYAML，已跳过"
+                 "（完整安装会在依赖装好后由单元测试加载知识包完成校验）")
+        else:
+            try:
+                data = yaml.safe_load(kb.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("知识包根节点必须是映射（键值对）")
+            except Exception as exc:
+                raise InstallError(
+                    f"知识包解析失败：{type(exc).__name__}: {exc}",
+                    "请检查 knowledge/ningxia_cluster.yaml 的 YAML 语法与顶层结构；"
+                    "也可先执行 python -m gcs.demo --jobs 5（冒烟演示）确认知识包可正常加载。",
+                ) from exc
     probe = root / ".gcs_install_probe"
     try:
         # 探针写固定 LF，避免 Windows CRLF 与 .gitattributes eol=lf 漂移；内容为空
@@ -874,8 +885,11 @@ def main(argv=None) -> int:
                     f"也可直接运行完整安装：python install.py。",
                 )
             ok(f"项目目录：{CWD}")
-            precheck(CWD)
+            # 依赖校验放在结构预检之前：全新机器上缺 PyYAML 是最常见的情况，
+            # 应当先给出「pip install -r requirements.txt」这条可操作指引，
+            # 而不是让它表现为后面的知识包/结构类错误。
             check_runtime_deps()
+            precheck(CWD)
             ok("预检通过：未做任何修改。去掉 --check 即可开始安装。")
             return 0
 

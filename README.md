@@ -39,6 +39,7 @@
 ### 2.1 一键安装（推荐）
 
 只需 **Python 3.10+**；安装脚本本身只用标准库，运行前不需要装任何依赖。
+脚本会在项目内创建 `.venv` 并自动安装 PyYAML，**不会**改动系统 Python 环境。
 
 **方式 A：已下载或 clone 了整个项目**
 
@@ -62,6 +63,30 @@ bash install.sh
 python install.py
 python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 ```
+
+### 2.2 先自检、再安装（可选，两种等价用法）
+
+只想确认环境能否跑通、不想改动磁盘时，用只读预检：
+
+```bash
+python install.py --check        # 只读：Python 版本 + 项目结构 + 依赖是否可用，不写任何文件
+```
+
+若预检提示**缺少 PyYAML**，说明当前 Python 环境没有运行时依赖。两条路任选一条：
+
+```bash
+# 路线 1（推荐）：直接完整安装——脚本会自建 .venv 并安装依赖，无需事先准备
+python install.py
+
+# 路线 2：先在当前环境装依赖，再安装/运行
+python -m pip install -r requirements.txt
+python install.py
+```
+
+> 说明：`--check` 会**优先**报告依赖缺失（而非配置类错误），并给出上方的 pip 命令，
+> 因此不存在「先改配置后才发现是缺依赖」的误导。完整安装过程中，知识包的语法与取值域
+> 仍会被校验（由安装后的单元测试加载知识包完成），只是推迟到依赖就绪之后。
+
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
 → 跑 147 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
@@ -188,7 +213,7 @@ python app/server.py --open
 
 - 响应统一带 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
   与 `Content-Security-Policy`（默认拒绝一切外部加载，只放行内联样式/脚本与同源 `fetch`）；
-- `Server` 头只回 `GreenCompute/1.0.0`，不回解释器精确版本；
+- `Server` 头只回 `GreenCompute/1.0.1`，不回解释器精确版本；
 - `Host` 头走白名单：回环名、`--host` 绑定地址、本机主机名/FQDN 与其解析出的本机 IP；
   需要额外域名时用 `GCS_ALLOWED_HOSTS=域名1,域名2` 追加。缺失 `Host` 回 `400`，不在白名单回 `403`（阻断 DNS rebinding）；
 - `/favicon.ico` 显式回 `204`，控制台不再出现无意义的 404。

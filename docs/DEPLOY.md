@@ -66,8 +66,8 @@ git push
 python -m unittest discover -s tests -v        # 回归
 python evaluation/run_eval.py                  # 确认最终评测数据（会覆盖已提交的结果文件）
 git add -A && git commit -m "docs: 更新最终评测结果"
-git tag -a v1.0.0 -m "参赛版本 v1.0.0"
-git push && git push origin v1.0.0
+git tag -a v1.0.1 -m "参赛版本 v1.0.1"
+git push && git push origin v1.0.1
 ```
 
 - 答辩版建议打 tag，便于评委按固定版本复现。
@@ -231,12 +231,19 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 一律「存在即跳过」；`.env` 已存在时即使选择接入也不改写，只提示手动编辑。
 `--check` 是只读预检：不会 clone、不会安装依赖、**不改动项目内任何文件**（仅写入并立即删除一个可写性探针 `.gcs_install_probe`）；校验范围含 Python 版本、项目结构，以及唯一第三方运行时依赖 PyYAML（`>=6.0,<7.0`）——缺失/不可导入/版本越界时返回非零并给出可操作提示。
 
+**检查顺序（v1.0.1 起）**：`--check` 先校验收**运行时依赖**，再做项目结构与写权限预检。
+原因是全新机器上系统 Python 往往没有 PyYAML，这是最常见的情况，应当第一屏就给出
+`pip install -r requirements.txt` 的可操作指引，而不是让它表现为结构类/配置类错误。
+完整安装路径下，`precheck()` 的知识包语法预检在缺 PyYAML 时会**跳过并明确说明**（不再误报
+「知识包解析失败」），知识包仍会在 venv 装好依赖后由单元测试加载校验——校验不丢失，只是
+推迟到依赖就绪之后。因此全新机器可直接 `python install.py`（自建 venv 并装依赖），无需事先准备。
+
 **CI 校验**：`test` job 增加 `python -m py_compile install.py` 与 `python install.py --check`，
 覆盖全部 5 个平台 / 版本组合；安装脚本不需要任何 Secret。
 
 **常见坑**
 
-1. Windows runner 的 stdout 是 cp1252，安装脚本的中文日志依赖 `sys.stdout.reconfigure(encoding="utf-8")` + `chcp.com 65001` 兜底（Windows 上只有 `chcp.com`，没有 `chcp.exe`，`CreateProcess` 不会按 `PATHEXT` 补 `.COM`）；新增输出时保持同一处理。
+1. Windows 控制台默认代码页是 cp936（中文）/ cp1252（英文系统），安装脚本统一把 `sys.stdout` 与 `sys.stderr` 重配为 UTF-8 并带 `errors="replace"`，**不做 `chcp` 变更**（避免与子进程解码冲突）；子进程输出按本地首选编码 + `errors="replace"` 解码。新增输出时保持同一处理。
 2. **`install.bat` 必须保持 CRLF + 纯 ASCII**：cmd.exe 按当前控制台代码页解析批处理，LF 换行叠加中文（多字节 DBCS）会把整行截断成碎片命令并被执行（典型报错 `'cho.' 不是内部或外部命令`）。仓库根 `.gitattributes` 已强制 `*.bat text eol=crlf`、`*.sh text eol=lf`、`*.py text eol=lf`——没有它，Windows 的 `core.autocrlf=true` 会把 `install.sh` 转成 CRLF，导致 Linux/macOS 上 shebang 变成 `#!/usr/bin/env bash\r` 而报 `bad interpreter`。所有中文提示统一由 `install.py` 以 UTF-8 输出，批处理只保留 ASCII 提示。
 3. **`install.bat` 透传退出码**：脚本用 `set "GCS_RC=%errorlevel%"` 立即捕获，再 `exit /b %GCS_RC%`，因此 `install.bat --check` 的退出码与 `python install.py --check` 一致（自动化可据退出码判断成败）。
 4. 只下载 `install.py` 时脚本会自动 clone；若目标目录已有内容，脚本拒绝覆盖并提示改用 `--dir`，绝不删除用户数据。
@@ -290,7 +297,7 @@ python app/server.py
 | `X-Frame-Options` | `DENY` | 禁止被 iframe 嵌套（防点击劫持） |
 | `Referrer-Policy` | `no-referrer` | 不外泄来源页面 |
 | `Content-Security-Policy` | `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` | 页面为单文件内联 JS/CSS，故放开 inline；外部脚本/样式/连接一律阻断 |
-| `Server` | `GreenCompute/1.0.0` | 不回解释器精确版本 |
+| `Server` | `GreenCompute/1.0.1` | 不回解释器精确版本 |
 | `Host` | 白名单校验；缺失 `400`、不在白名单 `403` | 白名单=回环名 + `--host` 绑定地址 + 本机主机名/FQDN/本机 IP；额外域名用 `GCS_ALLOWED_HOSTS=a,b` 追加 |
 
 > 反向代理部署时：HSTS（`Strict-Transport-Security`）应在**代理层**下发（本服务不提供 TLS，自行下发无效）；
