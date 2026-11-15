@@ -315,8 +315,10 @@ jobs:
               for k, v in g.items():
                   if k in ("name",):
                       continue
-                  if k == "n":
-                      assert isinstance(v, int), f"{code}.n must be int"
+                  # 标量字段：n = 种子数；jobs = 本次运行的作业规模
+                  # （jobs 由 run_eval 写入实际值，用于消除「产物声明 80 但实跑 6」的自相矛盾）
+                  if k in ("n", "jobs"):
+                      assert isinstance(v, int) and v > 0, f"{code}.{k} must be a positive int"
                       continue
                   assert isinstance(v, list) and len(v) == 2, f"{code}.{k} must be [mean, sd]"
           print(f"OK: {len(rows)} rows, groups {dict(groups)}, summary.json fresh with {len(s)} groups")
