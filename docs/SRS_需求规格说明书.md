@@ -1,6 +1,6 @@
 # 需求规格说明书 (SRS)
 
-绿算调度 GreenCompute-Scheduler — 2026 第五届「未来杯」创新大赛 · 赛道一「Agent 编排创新应用」
+绿算调度 GreenCompute-Scheduler — 2026 第五届「未来杯」创新大赛 · 赛题一「Agent 编排创新应用」
 
 **版本**：1.0（提交版）  
 **知识包版本对齐**：nx-2026.12  
@@ -31,7 +31,7 @@
 
 ### 1.2 适用赛道与评分点
 
-- 赛道：2026 第五届「未来杯」创新大赛 · 赛道一「Agent 编排创新应用」
+- 赛道：2026 第五届「未来杯」创新大赛 · 赛题一「Agent 编排创新应用」
 - 技术栈：Python，国内 LLM API 仅为可选接入，离线运行不消耗模型额度
 - 团队规模：≤ 5 人
 - 开源框架：允许使用，但须有原创改进（本项目原创：七角色八状态机、五层验证器、六维 rubric、定向返工、知识包外置、帕累托前沿分析）
@@ -103,7 +103,7 @@
 
 ## 五、验收标准
 
-- `python -m unittest discover -s tests -v` 全部通过（147 个测试）。
+- `python -m unittest discover -s tests -v` 全部通过（171 个测试）。
 - `python evaluation\trace_fit.py` 四项硬断言全部通过（电价时段、峰谷比、排放因子、绿电曲线）。
 - `python -m gcs.demo --jobs 60 --seed 20261111` 生成 `runs/latest.html` 且可在浏览器离线打开。
 - `python evaluation\run_eval.py` 产出 `results.csv`（18 行）、`summary.md`、`eval_report.html`。
