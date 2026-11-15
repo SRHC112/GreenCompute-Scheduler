@@ -52,5 +52,5 @@ evaluation/*.json
 !evaluation/pareto.json
 !evaluation/ci_bootstrap.json
 !evaluation/diff_ci.json
-evaluation/trace_fit.json
+!evaluation/trace_fit.json
 evaluation/traces/

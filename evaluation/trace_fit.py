@@ -29,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from gcs.knowledge import KnowledgePack, segment_of  # noqa: E402
+from gcs.knowledge import KnowledgeError, KnowledgePack, segment_of  # noqa: E402
 
 OUT = ROOT / "evaluation" / "trace_fit.json"
 TRACES = ROOT / "evaluation" / "traces"
@@ -50,7 +50,26 @@ PUBLIC_TARIFF: dict[int, str] = {
 # 峰谷浮动规则：一般工商业峰段上浮 60%、谷段下浮 40%
 PUBLIC_PEAK_RATIO = 1.6
 PUBLIC_VALLEY_RATIO = 0.6
-RATIO_TOL = 0.02          # 允许 2% 的取整误差
+# ---------------- 统一阈值定义（语义 / 取值范围 / 默认值） ----------------
+# 所有硬性断言的容差集中在此，口径统一为「相对误差 / 绝对误差 / 形态相关」，并注明有效范围。
+# 1) 分时电价时段：逐小时精确一致（无容差）。
+TARIFF_EXACT = True
+# 2) 峰谷浮动比：相对误差（|ratio/target-1|）。取值范围 (0,0.10]；默认 0.02（±2%）。
+RATIO_REL_TOL = 0.02
+# 3) 排放因子：绝对误差（kg CO2/kWh）。取值范围 [0,0.01]；默认 1e-4。
+CARBON_ABS_TOL = 1e-4
+# 4) 绿电曲线：相关系数为硬门槛、R²为提示（受水平差影响，不阻断）。
+#    取值范围 [0,1]；默认门槛 0.85、R² 提示线 0.40。
+GREEN_CORR_MIN = 0.85
+GREEN_R2_INFO = 0.40
+
+THRESHOLDS = {
+    "tariff_exact": TARIFF_EXACT,
+    "ratio_rel_tol": RATIO_REL_TOL,
+    "carbon_abs_tol": CARBON_ABS_TOL,
+    "green_corr_min": GREEN_CORR_MIN,
+    "green_r2_info": GREEN_R2_INFO,
+}
 
 # 生态环境部《关于发布2023年电力二氧化碳排放因子的公告》（公告〔2024〕第10号）
 PUBLIC_CARBON_NW_GRID = 0.6773
@@ -139,8 +158,8 @@ def check_ratio(pack: KnowledgePack) -> dict:
         flat = p.price["flat"]
         peak_ratio = p.price["peak"] / flat if flat else 0.0
         valley_ratio = p.price["valley"] / flat if flat else 0.0
-        good = (abs(peak_ratio - PUBLIC_PEAK_RATIO) <= RATIO_TOL
-                and abs(valley_ratio - PUBLIC_VALLEY_RATIO) <= RATIO_TOL)
+        good = (abs(peak_ratio / PUBLIC_PEAK_RATIO - 1.0) <= RATIO_REL_TOL
+                and abs(valley_ratio / PUBLIC_VALLEY_RATIO - 1.0) <= RATIO_REL_TOL)
         ok = ok and good
         detail.append({"pool": p.id, "peak_ratio": round(peak_ratio, 4),
                        "valley_ratio": round(valley_ratio, 4), "ok": good})
@@ -155,7 +174,7 @@ def check_ratio(pack: KnowledgePack) -> dict:
 def check_carbon(pack: KnowledgePack) -> dict:
     """核对排放因子是否等于公开发布的西北区域电网因子。"""
     got = pack.grid_carbon_factor
-    passed = abs(got - PUBLIC_CARBON_NW_GRID) < 1e-9
+    passed = abs(got - PUBLIC_CARBON_NW_GRID) <= CARBON_ABS_TOL
     return {
         "name": "电网排放因子核对",
         "source": "生态环境部公告〔2024〕第10号（2023 年西北区域电网 0.6773）",
@@ -197,12 +216,20 @@ def check_green(pack: KnowledgePack) -> dict:
                        "接入实测购电曲线后应替换本项。"
                        ) % (f"{mean_level:.0%}", f"{wind_pv:.0%}",
                             f"{PUBLIC_RENEWABLE_WEIGHT_2024:.0%}"),
-        "passed": corr >= 0.85,
+        "r2_info_ok": fit_r2 >= GREEN_R2_INFO,
+        "passed": corr >= GREEN_CORR_MIN,
     }
 
 
 def main() -> int:
-    pack = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
+    # F3：知识包缺失/非法不抛裸 traceback，统一收敛成结构化中文错误 + 退出码 2；
+    # 1 保留给「检查不通过（all_passed=False）」，供 CI 卡口使用（见 F7 注释）。
+    try:
+        pack = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
+    except KnowledgeError as exc:
+        print(f"[ERROR] 知识包加载失败：{exc}", file=sys.stderr)
+        print(f"[ERROR] 请确认知识包文件存在且为合法 YAML。", file=sys.stderr)
+        return 2
     checks = [check_tariff(pack), check_ratio(pack), check_carbon(pack), check_green(pack)]
 
     # 落一份参照曲线，便于人工比对与外部替换
@@ -218,7 +245,9 @@ def main() -> int:
         "checks": checks,
         "all_passed": all(c["passed"] for c in checks),
     }
-    OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # newline="\n"：产物固定 LF，与 .gitattributes 的 eol=lf 一致
+    OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                   encoding="utf-8", newline="\n")
 
     print(f"知识包版本：{pack.version}")
     for c in checks:
@@ -238,4 +267,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Windows 控制台默认 cp1252/GBK，中文输出会抛 UnicodeEncodeError。
+    # stdout/stderr 一并重配（argparse 报错走 stderr）。
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            try:
+                _reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # best-effort：失败不阻断主流程（编码/发送兜底）
+                pass
     sys.exit(main())

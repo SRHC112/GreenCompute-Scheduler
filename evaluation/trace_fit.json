@@ -1,0 +1,60 @@
+{
+  "pack_version": "nx-2026.12",
+  "checks": [
+    {
+      "name": "分时电价时段对齐",
+      "source": "宁夏 2024 年一般工商业分时电价口径",
+      "checked_hours": 24,
+      "mismatches": [],
+      "passed": true
+    },
+    {
+      "name": "峰谷浮动比例核对",
+      "source": "峰 = 平 × 1.6、谷 = 平 × 0.6（宁夏一般工商业公开规则）",
+      "pools": [
+        {
+          "pool": "ZW-A100",
+          "peak_ratio": 1.6,
+          "valley_ratio": 0.6,
+          "ok": true
+        },
+        {
+          "pool": "ZW-H800",
+          "peak_ratio": 1.6,
+          "valley_ratio": 0.6,
+          "ok": true
+        },
+        {
+          "pool": "YC-A800",
+          "peak_ratio": 1.6,
+          "valley_ratio": 0.6,
+          "ok": true
+        }
+      ],
+      "passed": true
+    },
+    {
+      "name": "电网排放因子核对",
+      "source": "生态环境部公告〔2024〕第10号（2023 年西北区域电网 0.6773）",
+      "pack": 0.6773,
+      "public_nw_grid": 0.6773,
+      "public_national": 0.5366,
+      "passed": true
+    },
+    {
+      "name": "绿电曲线与参照曲线拟合",
+      "source": "参照曲线由宁夏 2024 年公开装机结构重构（形态参照，非官方实测出力）",
+      "mae_normalized": 0.1189,
+      "rmse_normalized": 0.152,
+      "pearson_r": 0.8693,
+      "r2": 0.4412,
+      "pack_mean_level": 0.665,
+      "public_wind_pv_capacity_share": 0.28,
+      "public_renewable_weight_2024": 0.35,
+      "level_note": "知识包曲线是「绿电消费占比」口径（含绿证与跨区绿电交易），水平（66%）高于风光装机占比（28%）与消纳责任权重（35%），三者口径不同、不可直接比较；接入实测购电曲线后应替换本项。",
+      "r2_info_ok": true,
+      "passed": true
+    }
+  ],
+  "all_passed": true
+}

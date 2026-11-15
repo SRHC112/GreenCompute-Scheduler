@@ -7,19 +7,21 @@
 
 凭据写入项目根 ``.env``（已被 .gitignore 忽略），只保存 salted sha256 派生值；
 明文令牌只在本命令的标准输出出现一次，不落盘、不进日志、不进仓库与参赛提交包。
-本工具完全独立于 ``install.py`` 与 ``GCS_LLM_*``，不并入 LLM_KEYS / offline_env() /
-configure_llm()，也不具备「缺配置就降级放行」的 fail-open 语义。
+本工具不并入 ``install.py`` 的 LLM 配置流程（LLM_KEYS / offline_env() /
+configure_llm()），也不具备「缺配置就降级放行」的 fail-open 语义；仅在 .env
+权限收紧这一处复用其纯函数实现，避免两份 ACL 策略漂移。
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+_LOG = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -43,7 +45,12 @@ def read_env(path: Path) -> dict:
 
 def upsert_env(path: Path, updates: dict[str, str]) -> None:
     """按 KEY=VALUE 更新 .env：保留注释与其他键，缺失键追加到文件末尾。"""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+    except UnicodeError as exc:
+        # 非 UTF-8 .env 拒绝读写，避免按系统默认编码误读后覆盖损坏文件
+        print(f"[WARN] {path} 不是 UTF-8 编码，拒绝读写（避免损坏非 UTF-8 文件）", file=sys.stderr)
+        raise
     out: list[str] = []
     seen: set[str] = set()
     for line in lines:
@@ -61,33 +68,28 @@ def upsert_env(path: Path, updates: dict[str, str]) -> None:
             out.append("")
         out.append("# 操作台静态令牌鉴权（GCS_AUTH_*，与 GCS_LLM_* 相互独立）")
         out.extend(f"{k}={v}" for k, v in missing)
-    path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    path.write_text("\n".join(out) + "\n", encoding="utf-8")  # OSError 由调用处兜底
 
 
 def harden(path: Path) -> None:
-    """收紧 .env 权限；失败只告警不静默（与安装脚本同样的处理原则）。"""
-    if os.name == "nt":
-        user = os.environ.get("USERNAME") or ""
-        if not user:
-            print("WARN 无法确定当前用户名，请手动检查 .env 的 ACL。")
-            return
-        try:
-            proc = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True, text=True, timeout=20,
-            )
-            if proc.returncode != 0:
-                print("WARN icacls 返回非 0，请手动检查 .env 的 ACL。")
-            else:
-                print("OK   .env 权限已收紧（仅当前用户可读）。")
-        except Exception as exc:
-            print(f"WARN icacls 调用失败（{type(exc).__name__}），请手动检查 ACL。")
-        return
+    """收紧 .env 权限：复用 install.py 的单一实现，保持本工具原有输出格式。"""
     try:
-        os.chmod(path, 0o600)
-        print("OK   .env 权限已设为 600。")
-    except OSError as exc:
-        print(f"WARN chmod 失败（{exc}），请手动检查 .env 权限。")
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_gcs_install_for_harden", ROOT / "install.py")
+        if spec is None or spec.loader is None:
+            raise ImportError(f"无法为 {ROOT / 'install.py'} 创建模块规格")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        print(f"WARN 无法加载权限收紧实现（{type(exc).__name__}），请手动检查 .env 的 ACL。")
+        return
+    status = mod.harden_env_permissions(path, notify=lambda msg: print("WARN " + msg))
+    if status == "ok":
+        if os.name == "nt":
+            print("OK   .env 权限已收紧（仅当前用户可读）。")
+        else:
+            print("OK   .env 权限已设为 600。")
 
 
 def _print_token(token: str) -> None:
@@ -117,7 +119,14 @@ def cmd_generate(path: Path, force: bool = False) -> int:
         updates["GCS_AUTH_MODE"] = DEFAULT_MODE
     if not cur.get("GCS_AUTH_MAX_AGE_DAYS"):
         updates["GCS_AUTH_MAX_AGE_DAYS"] = str(DEFAULT_MAX_AGE_DAYS)
-    upsert_env(path, updates)
+    try:
+        upsert_env(path, updates)
+    except (OSError, UnicodeError) as exc:
+        # 目录不存在 / 无写权限 / 非 UTF-8 .env：给出可操作提示，不抛裸栈
+        print(f"[ERROR] 无法写入 {path}：{exc}")
+        print("[HINT] 请确认目标目录存在且当前账户有写权限；"
+              "也可用 --env 指定一个已存在的 .env 文件路径。")
+        return 2
     harden(path)
     print(f"已写入 {path}（模式 {cur.get('GCS_AUTH_MODE', DEFAULT_MODE)}，"
           f"过期上限 {cur.get('GCS_AUTH_MAX_AGE_DAYS', DEFAULT_MAX_AGE_DAYS)} 天）。")
@@ -126,6 +135,9 @@ def cmd_generate(path: Path, force: bool = False) -> int:
 
 
 def cmd_rotate(path: Path, hours: int = ROTATION_WINDOW_HOURS) -> int:
+    if hours < 0:
+        print("[ERROR] --hours 不能为负（旧凭据保留窗口至少 0 小时）。")
+        return 2
     cur = read_env(path)
     old = cur.get("GCS_AUTH_TOKEN_HASH")
     if not old:
@@ -133,12 +145,18 @@ def cmd_rotate(path: Path, hours: int = ROTATION_WINDOW_HOURS) -> int:
         return 2
     token = generate_token()
     until = rotation_deadline(hours)
-    upsert_env(path, {
-        "GCS_AUTH_TOKEN_PREV_HASH": old,
-        "GCS_AUTH_PREV_VALID_UNTIL": until,
-        "GCS_AUTH_TOKEN_HASH": hash_token(token),
-        "GCS_AUTH_ISSUED_AT": datetime.now(timezone.utc).isoformat(),
-    })
+    try:
+        upsert_env(path, {
+            "GCS_AUTH_TOKEN_PREV_HASH": old,
+            "GCS_AUTH_PREV_VALID_UNTIL": until,
+            "GCS_AUTH_TOKEN_HASH": hash_token(token),
+            "GCS_AUTH_ISSUED_AT": datetime.now(timezone.utc).isoformat(),
+        })
+    except OSError as exc:
+        print(f"[ERROR] 无法写入 {path}：{exc}")
+        print("[HINT] 请确认目标目录存在且当前账户有写权限；"
+              "也可用 --env 指定一个已存在的 .env 文件路径。")
+        return 2
     harden(path)
     print(f"轮换完成：旧凭据在 {until} 前仍可用（窗口 {hours} 小时），之后自动失效。")
     _print_token(token)
@@ -156,10 +174,15 @@ def cmd_status(path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+    # stdout/stderr 都重配：argparse 的错误提示走 stderr，只配 stdout 会在
+    # cp1252 控制台上把中文转成 \uXXXX 转义。
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            try:
+                _reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # best-effort：失败不阻断主流程（编码/发送兜底）
+                _LOG.debug("流重配 UTF-8 失败", exc_info=True)
     ap = argparse.ArgumentParser(description="绿算调度操作台鉴权凭据工具")
     ap.add_argument("command", nargs="?", default="generate",
                     choices=("generate", "rotate", "status"))

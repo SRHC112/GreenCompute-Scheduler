@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 from .knowledge import KnowledgePack
 from .llm import ModelGateway
-from .simulator import Job, JobResult, RunMetrics
+from .simulator import Job, JobResult
 
 REQUIRED_PLAN_FIELDS = ("pool_id", "start_min")
 
@@ -46,6 +46,9 @@ class VerifyReport:
     """验证报告：缺陷清单 + 已检查作业数。blocking 属性只返回阻塞项。"""
     defects: list[Defect] = field(default_factory=list)
     checked: int = 0
+    rubric_source: str = ""
+    """L5 语义判定的来源："llm" 表示真实模型 Judge，"offline-mock" 表示离线规则兜底。
+    与 gcs/llm.ModelGateway.stats() 的 rubric_source 口径保持一致（F6）。"""
 
     @property
     def blocking(self) -> list[Defect]:
@@ -60,8 +63,9 @@ class VerifyReport:
         return out
 
     def as_dict(self) -> dict:
-        """转成报告字段：检查数、缺陷总数、分层计数与缺陷明细。"""
+        """转成报告字段：检查数、缺陷总数、分层计数与缺陷明细，并带上 L5 判定来源。"""
         return {"checked": self.checked, "count": len(self.defects),
+                "rubric_source": self.rubric_source,
                 "by_layer": self.by_layer(),
                 "defects": [d.as_dict() for d in self.defects]}
 
@@ -73,9 +77,9 @@ class Verifier:
         """绑定知识包与可选网关；没有网关时 L5 退化为确定性规则，不依赖网络。"""
         self.pack = pack
         self.llm = llm
+        self.rubric_source = "llm" if (llm is not None and llm.online) else "offline-mock"
 
-    def verify(self, jobs: list[Job], plan: dict[str, dict], results: list[JobResult],
-               metrics: RunMetrics) -> VerifyReport:
+    def verify(self, jobs: list[Job], plan: dict[str, dict], results: list[JobResult]) -> VerifyReport:
         """依次做 L1 结构 → L2 数值 → L3 约束 → L4 可达性 → L5 语义（Judge）校验。"""
         rep = VerifyReport()
         self._l1_structure(jobs, plan, results, rep)
@@ -83,6 +87,8 @@ class Verifier:
         self._l3_constraints(jobs, results, rep)
         self._l4_reachability(plan, rep)
         self._l5_semantics(jobs, plan, rep)
+        # F6：L5 判定来源与 llm.mode/rubric_source 口径一致，供产物/报告区分在线与离线降级。
+        rep.rubric_source = "llm" if (self.llm is not None and self.llm.online) else "offline-mock"
         rep.checked = len(jobs)
         return rep
 
@@ -162,7 +168,6 @@ class Verifier:
                     f"{r.job_id} 实际完成 {r.end_min}min，超出截止 {job.deadline_min}min",
                     evidence, r.job_id, action=action))
             if not r.budget_ok:
-                tol = self.pack.constraints.get("max_budget_overrun", 0.0)
                 # 成本超预算有两种根因：估错了（时长低估）或排错了（选贵池/峰段）
                 hours_est = job.duration_est / 60
                 hours_act = (r.end_min - r.start_min) / 60

@@ -96,14 +96,14 @@
 1. 模拟器只负责「按计划执行并给出真实结果」，不含任何调度逻辑——调度决策全部来自 Agent。
 2. 所有指标数字由确定性模块计算，模型只产出归因叙述与语义层 Judge 意见，避免 LLM 幻觉污染指标。
 3. 缺陷归因区分「估错了」与「排错了」，修复动作完全不同，不得混为一谈。
-4. 返工预算：`max_rounds=2`、`max_tokens=600000`、`max_seconds=900`，超限升级人工并保留现场。
+4. 返工预算：`max_rounds=2`、`max_tokens=600000`、`max_seconds=900`；前两者为硬约束（超限即停并保留现场），`max_seconds` 为预留字段，当前仅展示剩余预算、未启用超时熔断。
 5. 面向用户的所有可见文本（回复、界面、提示、报错、生成文件中的可见文字）一律使用中文。
 
 ---
 
 ## 五、验收标准
 
-- `python -m unittest discover -s tests -v` 全部通过（109 个测试）。
+- `python -m unittest discover -s tests -v` 全部通过（147 个测试）。
 - `python evaluation\trace_fit.py` 四项硬断言全部通过（电价时段、峰谷比、排放因子、绿电曲线）。
 - `python -m gcs.demo --jobs 60 --seed 20261111` 生成 `runs/latest.html` 且可在浏览器离线打开。
 - `python evaluation\run_eval.py` 产出 `results.csv`（18 行）、`summary.md`、`eval_report.html`。

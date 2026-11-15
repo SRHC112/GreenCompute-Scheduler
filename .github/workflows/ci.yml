@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+# concurrency 用 workflow 级：语义是「同一分支的新 push 取消旧的整个 run」，
+# 同一 run 内的 job（含 matrix 各组合、evaluation）互不影响。
+# 实测教训（2026-11-15 GitHub runner）：若下移到 job 级且 group 不含 matrix
+# 维度，同一 run 的 5 个 matrix 组合会共享 group 并因 cancel-in-progress
+# 互相取消，最终只剩最后启动的一个 job。
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -44,32 +49,89 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          # 缓存键同时包含运行时依赖与 CI 工具依赖，两者任一变动都会重新拉取
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ci.txt
 
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # CI 专用质量工具一次装齐（coverage / mypy / types-PyYAML）：
+      # 写成 requirements-ci.txt 才能命中 setup-python 的 pip 缓存——
+      # 若在 step 内现装，5 个矩阵组合各装一次 mypy，慢网下容易顶到 timeout-minutes。
+      - name: 安装 CI 质量工具
+        run: python -m pip install -r requirements-ci.txt
+
       - name: 语法检查（全量编译）
         run: python -m compileall -q gcs app evaluation tests
 
-      # 安装脚本随 PR 一起校验：语法 + 只读预检（--check 不 clone、不写入）
+      # 安装脚本随 PR 一起校验：语法 + 只读预检（--check 不 clone、不改动项目文件）
       - name: 安装脚本自检
         run: |
           python -m py_compile install.py
           python install.py --check
 
+      # 安装入口的字节约定：install.bat 必须 CRLF + 纯 ASCII（cmd.exe 在 LF 或多字节
+      # 文本下会把整行截断成碎片命令），install.sh 必须 LF（shebang 带 \r 会 bad interpreter）。
+      # 这两条都曾真实发生过，故固化为 CI 门禁。
+      - name: 安装入口字节约定校验
+        shell: python
+        run: |
+          import sys as _sys
+          # Windows runner 控制台为 cp1252：不重配则中文提示/断言消息会
+          # 抛 UnicodeEncodeError，掩盖真实失败原因
+          for _stream in (_sys.stdout, _sys.stderr):
+              _reconfigure = getattr(_stream, "reconfigure", None)
+              if _reconfigure is not None:
+                  try:
+                      _reconfigure(encoding="utf-8", errors="replace")
+                  except Exception:
+                      pass
+          from pathlib import Path
+          bat = Path("install.bat").read_bytes()
+          assert b"\r\n" in bat and b"\n" not in bat.replace(b"\r\n", b""), \
+              "install.bat 必须是纯 CRLF 换行"
+          assert all(b < 128 for b in bat), "install.bat 必须纯 ASCII（中文提示由 install.py 输出）"
+          sh = Path("install.sh").read_bytes()
+          assert b"\r" not in sh, "install.sh 必须 LF 换行（shebang 不能带 CR）"
+          print("OK: install.bat=CRLF+ASCII, install.sh=LF")
+
+      # 真正执行两个薄入口（此前只校验字节约定，不实际运行）：
+      # Linux 跑 install.sh，Windows 跑 install.bat —— 两者必须都能在 10 秒内返回 rc=0
+      - name: 安装薄入口实跑（Linux）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash install.sh --check
+
+      - name: 安装薄入口实跑（Windows）
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat --check
+
       # 覆盖率工具只装在 CI（开发/运行时依赖仍仅 PyYAML，见 README「唯一运行时依赖」承诺）
       - name: 单元测试（unittest 全量 + 覆盖率统计）
         run: |
-          python -m pip install coverage
           python -m coverage run --source=gcs -m unittest discover -s tests -v
 
       # 基线八（三）L107-108「设定覆盖率目标并纳入 CI」+ SRS TG-06 70% 取并集（更严者）
-      # 本地实测基线：gcs/ 核心逻辑 87%（109 个单测）
+      # 本地实测基线：gcs/ 核心逻辑 89%（147 个单测）
       - name: 覆盖率检查（核心逻辑 gcs/ 目标 ≥70%）
         run: python -m coverage report --show-missing --fail-under=70
+
+      # 3.7：类型纪律门禁。mypy 已在本地与 CI 基线全绿
+      # （Success: no issues found in 13 source files），改为真阻断：
+      # 新引入的类型错误会让 CI 变红。mypy.ini 开了 warn_unused_ignores，
+      # 如需 ignore 必须精确到错误码。
+      - name: 类型检查（mypy）
+        run: |
+          # coverage / mypy / types-PyYAML 已在「安装 CI 质量工具」步骤一次性装好
+          # （types-PyYAML 提供 yaml 的类型存根，否则 mypy 会报与项目代码无关的 import-untyped）
+          # 覆盖 gcs/ + app/ + evaluation/ + install.py：只查 gcs/ 会漏掉
+          # app/evaluation 的类型缺陷（2026-11-15 扩展验证时发现 8 处）
+          python -m mypy gcs app evaluation install.py --ignore-missing-imports
 
       - name: 一键编排演示
         run: python -m gcs.demo --jobs 20 --seed 7
@@ -80,6 +142,16 @@ jobs:
       - name: 校验看板与指标产物
         shell: python
         run: |
+          import sys as _sys
+          # Windows runner 控制台为 cp1252：不重配则中文提示/断言消息会
+          # 抛 UnicodeEncodeError，掩盖真实失败原因
+          for _stream in (_sys.stdout, _sys.stderr):
+              _reconfigure = getattr(_stream, "reconfigure", None)
+              if _reconfigure is not None:
+                  try:
+                      _reconfigure(encoding="utf-8", errors="replace")
+                  except Exception:
+                      pass
           import sys
           from pathlib import Path
           try:
@@ -94,20 +166,47 @@ jobs:
           assert html and metrics, "missing console.html / metrics.json"
           print(f"OK: {len(html)} dashboard(s), latest.html {latest.stat().st_size} bytes")
 
-      - name: 可视化操作台启动检查（仅 Linux）
-        if: runner.os == 'Linux'
-        shell: bash
+      # 跨平台 HTTP 探测：原先只有 Linux 跑（Windows 上端口占用语义不同，
+      # 正是 allow_reuse_address 缺陷的暴露平台），改用标准库 urllib，
+      # Windows / Linux / macOS 行为一致，且不依赖 curl。
+      - name: 可视化操作台启动检查（跨平台）
+        shell: python
         run: |
-          python app/server.py --port 8123 &
-          PID=$!
-          OK=0
-          for i in $(seq 1 20); do
-            if curl -fsS http://127.0.0.1:8123/ > /dev/null; then OK=1; break; fi
-            sleep 0.5
-          done
-          kill "$PID" 2>/dev/null || true
-          if [ "$OK" -ne 1 ]; then echo "操作台未能在 10 秒内响应"; exit 1; fi
-          echo "操作台 HTTP 响应正常"
+          import sys as _sys
+          # Windows runner 控制台为 cp1252：不重配则中文提示/断言消息会
+          # 抛 UnicodeEncodeError，掩盖真实失败原因
+          for _stream in (_sys.stdout, _sys.stderr):
+              _reconfigure = getattr(_stream, "reconfigure", None)
+              if _reconfigure is not None:
+                  try:
+                      _reconfigure(encoding="utf-8", errors="replace")
+                  except Exception:
+                      pass
+          import subprocess
+          import sys
+          import time
+          import urllib.request
+          proc = subprocess.Popen([sys.executable, "app/server.py", "--port", "8123"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          ok = False
+          try:
+              for _ in range(20):
+                  try:
+                      with urllib.request.urlopen("http://127.0.0.1:8123/", timeout=1) as r:
+                          ok = r.status == 200
+                          if ok:
+                              break
+                  except Exception:
+                      time.sleep(0.5)
+              if not ok:
+                  raise SystemExit("操作台未能在 10 秒内响应")
+              print("操作台 HTTP 响应正常")
+          finally:
+              proc.terminate()
+              try:
+                  proc.wait(timeout=10)
+              except Exception:
+                  proc.kill()
 
       - name: 上传演示产物
         if: always()
@@ -135,7 +234,10 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements.txt
+          # 与 test job 同样包含 requirements-ci.txt，保持两 job 共享的 pip 缓存键一致
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ci.txt
 
       - name: 安装依赖
         run: |
@@ -145,6 +247,10 @@ jobs:
       - name: 运行六组对照实验
         run: python evaluation/run_eval.py
 
+      # 知识包与公开口径的形状/数值核对（此前只在文档里承诺，未进 CI）
+      - name: 知识包形状自检（trace_fit）
+        run: python evaluation/trace_fit.py
+
       # 注意：run_eval.py 用 utf-8-sig 写 CSV（带 BOM），读取时必须用同一编码。
       # 输出同样保持 ASCII，兼容 Windows runner 的 cp1252 stdout。
       # 除了「存在且非空」，还要校验 summary.json 是本次运行写出的、结构可被操作台消费，
@@ -152,6 +258,16 @@ jobs:
       - name: 校验评测结果完整性
         shell: python
         run: |
+          import sys as _sys
+          # Windows runner 控制台为 cp1252：不重配则中文提示/断言消息会
+          # 抛 UnicodeEncodeError，掩盖真实失败原因
+          for _stream in (_sys.stdout, _sys.stderr):
+              _reconfigure = getattr(_stream, "reconfigure", None)
+              if _reconfigure is not None:
+                  try:
+                      _reconfigure(encoding="utf-8", errors="replace")
+                  except Exception:
+                      pass
           import csv
           import json
           import sys
@@ -167,12 +283,29 @@ jobs:
           assert len(rows) == 18, f"expected 18 rows (6 groups x 3 seeds), got {len(rows)}"
           groups = Counter(r["group"] for r in rows)
           assert len(groups) == 6 and set(groups.values()) == {3}, f"bad group distribution: {groups}"
+          # 数值层断言：结构合规但数值全 0 的半成品产物也必须被拦下
+          jobs = {int(r["jobs"]) for r in rows}
+          assert jobs == {80}, f"unexpected job counts: {jobs}"
+          for r in rows:
+              assert 0.0 <= float(r["sla_rate"]) <= 1.0, f"bad sla_rate for {r['group']}"
+              assert float(r["cost_per_gpu_hour"]) > 0, f"bad cost for {r['group']}"
+              assert float(r["rubric_score"]) > 0, f"bad rubric for {r['group']}"
 
-          csv_mtime = p.stat().st_mtime
-          for name in ("summary.md", "summary.json", "eval_report.html"):
+          # 产物新鲜度：8 份产物必须是「本次运行」写出的。
+          # 判定方式不依赖写入顺序（results.csv 现在是最后落盘的），
+          # 改为「彼此时间差 < 5 分钟」+「全部不早于 10 分钟前」两条。
+          import time
+          names = ("summary.md", "summary.json", "eval_report.html",
+                   "sensitivity.json", "pareto.json",
+                   "ci_bootstrap.json", "diff_ci.json", "trace_fit.json")
+          mtimes = []
+          for name in names:
               q = Path("evaluation") / name
               assert q.is_file() and q.stat().st_size > 0, f"missing {name}"
-              assert q.stat().st_mtime >= csv_mtime - 5, f"stale {name}: older than results.csv"
+              mtimes.append(q.stat().st_mtime)
+          spread = max(mtimes) - min(mtimes)
+          assert spread < 300, f"产物不是同一次运行写出（时间差 {spread:.0f}s）"
+          assert max(mtimes) >= time.time() - 600, "产物不新鲜（最新的一份也早于 10 分钟）"
 
           s = json.loads(Path("evaluation/summary.json").read_text(encoding="utf-8"))
           assert len(s) == 6, f"summary.json has {len(s)} groups, expected 6"

@@ -64,7 +64,7 @@
 
 - **源**：SRS §3.2 FR-05
 - **实现**：`gcs/agents.py:_candidate_starts` full 模式主动对齐谷段起点与峰段终点。
-- **验证**：`evaluation/trace_fit.py` 电价时段对齐（24 小时 0 不匹配）；`tests/test_scheduler.py` 调度可行性。
+- **验证**：`evaluation/trace_fit.py` 电价时段对齐（24 小时 0 不匹配）；`tests/test_smoke.py::test_scheduler_plan_covers_all_jobs`（排程覆盖全部作业）。
 
 ### FR-06 决策对照依据
 
@@ -76,13 +76,13 @@
 
 - **源**：SRS §3.2 FR-07
 - **实现**：`gcs/agents.py:Executor.run` 只统计 `retries`（SLA 不达标计数），不做判定；判定权在 A5。
-- **验证**：`tests/test_agents.py` Executor 行为测试。
+- **验证**：`tests/test_smoke.py::test_full_policy_converges`（端到端编排收敛）；Executor 的 `retries` 统计由 `tests/test_reflect.py::test_rework_command_carries_budget_and_scope` 间接覆盖，无独立用例。
 
 ### FR-08 故障注入
 
 - **源**：SRS §3.2 FR-08
 - **实现**：`gcs/simulator.py` 故障注入与 GPU 超时路径。
-- **验证**：`tests/test_simulator.py` 故障与降级测试。
+- **验证**：`tests/test_smoke.py::test_jobs_are_deterministic` 与 `::test_cluster_capacity_is_respected`（故障注入下的可复现与容量约束）；无独立故障注入用例。
 
 ### FR-09 五层验证器
 
@@ -106,7 +106,7 @@
 
 - **源**：SRS §3.3 FR-12
 - **实现**：`gcs/orchestrator.py:run` 八状态机 REWORK 分支，`plan.update(fresh)` 只覆盖责任节点新方案。
-- **验证**：`tests/test_orchestrator.py::TestRework`；`tests/test_pareto.py` 返工阈值敏感性。
+- **验证**：`tests/test_reflect.py::test_rework_command_carries_budget_and_scope`（返工预算与范围）、`tests/test_reflect.py::test_sla_defect_targets_scheduler_node`（归因路由）；`tests/test_pareto.py` 返工阈值敏感性。
 
 ### FR-13 console.html 看板
 
@@ -164,5 +164,5 @@
 |---|---|
 | 功能需求 FR-01 ~ FR-15 | 100% 有对应代码与测试 |
 | 非功能需求 NFR-01 ~ NFR-05 | 100% 有对应代码与测试 |
-| 测试用例覆盖 | 109 个测试，全部绿 |
+| 测试用例覆盖 | 147 个测试，全部绿 |
 | 知识包机器校验 | `evaluation/trace_fit.py` 4 项全部通过 |

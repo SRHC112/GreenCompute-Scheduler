@@ -15,7 +15,7 @@
     python install.py                     一键安装（交互询问是否接入大模型）
     python install.py --no-llm            跳过交互，离线模式安装（自动化 / CI）
     python install.py --llm               进入大模型配置（可用环境变量提供 Key）
-    python install.py --check             仅预检，不做任何修改
+    python install.py --check             仅预检（含 PyYAML 运行时依赖校验），不做任何修改
     python install.py --dir DIR           指定项目目录（脚本不在项目内时自动 clone 到此）
     python install.py --run demo          安装完成后运行（自动加载 .env + 虚拟环境）
     python install.py --run server       启动可视化操作台
@@ -29,15 +29,22 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import locale
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import urlparse
 from pathlib import Path
 
 REPO_URL = "https://github.com/SRHC112/GreenCompute-Scheduler.git"
 MIN_PY = (3, 10)
+_LOG = logging.getLogger(__name__)
+# --check 的运行时依赖校验范围：requirements.txt 声明的唯一第三方运行时依赖
+PY_YAML_MIN = (6, 0)       # 含
+PY_YAML_MAX = (7, 0)       # 不含
 SCRIPT_DIR = Path(__file__).resolve().parent
 CWD = Path.cwd()
 
@@ -64,20 +71,22 @@ ALIASES = {
     "eval": ["evaluation/run_eval.py"],
 }
 
+# 与 install.bat 同约束：ASCII-only（cmd 在多字节文本下会截断行）、
+# 块内不出现括号、结尾透传退出码；中文提示由 install.py 以 UTF-8 输出。
 RUN_BAT = """@echo off
 setlocal
 cd /d "%~dp0"
 if not exist ".venv\\Scripts\\python.exe" (
-  echo [ERROR] 尚未安装，请先运行 install.bat
-  pause
+  echo [ERROR] Not installed yet. Please run install.bat first.
   exit /b 1
 )
 ".venv\\Scripts\\python.exe" "install.py" --run %*
-if errorlevel 1 (
+set "GCS_RC=%errorlevel%"
+if not "%GCS_RC%"=="0" (
   echo.
-  echo [ERROR] 运行失败，请查看上方输出。
-  pause
+  echo [ERROR] Run failed - see the Chinese messages above.
 )
+exit /b %GCS_RC%
 """
 
 RUN_SH = """#!/usr/bin/env bash
@@ -108,19 +117,22 @@ class InstallError(Exception):
 
 # ---------------------------------------------------------------- 输出与执行
 def setup_console() -> None:
-    """Windows 控制台默认 cp1252，中文输出会抛 UnicodeEncodeError，这里统一处理。"""
+    """Windows 控制台默认 cp1252，中文输出会抛 UnicodeEncodeError，这里统一处理。
+
+    当前口径：子进程输出按本地首选编码（中文系统通常 GBK/CP936）用
+    errors="replace" 解码，保证「安装脚本本身输出」与「子进程输出」两套编码
+    互不影响；不做 chcp 变更，避免 chcp 65001 与子进程解码发生冲突。
+    """
     for stream in (sys.stdout, sys.stderr):
         try:
-            # line_buffering 避免脚本日志与子进程输出交错乱序
-            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
-        except Exception:
-            pass
-    if os.name == "nt":
-        try:  # 让 conhost 以 UTF-8 显示中文；失败也不影响功能
-            subprocess.run("chcp 65001", shell=True, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, check=False)
-        except Exception:
-            pass
+            # line_buffering 避免脚本日志与子进程输出交错乱序。
+            # 用 getattr 取 reconfigure：静态类型是 TextIO 协议，未声明该方法
+            # （mypy union-attr），运行时不存在时跳过即可。
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except Exception:  # best-effort：非 TTY / 已重定向流不支持 reconfigure
+            _LOG.debug("控制台 UTF-8 重配失败", exc_info=True)
 
 
 def info(msg: str) -> None:
@@ -139,6 +151,21 @@ def skip(msg: str) -> None:
     print(f"[SKIP] {msg}")
 
 
+def _child_encoding() -> str:
+    """子进程输出解码编码：中文系统按本地首选编码（GBK/CP936），保证子进程
+    失败提示可读；errors="replace" 保证解码失败不会中断流程。
+
+    与 setup_console 的策略统一：安装脚本自己输出统一按 UTF-8 + errors="replace"
+    处理，子进程按本地首选编码处理，两套策略互不重叠，不做 chcp 变更。
+    """
+    if os.name == "nt":
+        try:
+            return locale.getpreferredencoding(False) or "utf-8"
+        except Exception:  # best-effort：极端环境下退回 UTF-8
+            return "utf-8"
+    return "utf-8"
+
+
 def run(cmd, *, cwd=None, env=None, capture=True, check=False, hint=""):
     """统一子进程执行；失败时附带末尾输出与处理建议。"""
     argv = [str(c) for c in cmd]
@@ -146,7 +173,7 @@ def run(cmd, *, cwd=None, env=None, capture=True, check=False, hint=""):
         proc = subprocess.run(
             argv, cwd=str(cwd) if cwd else None, env=env,
             capture_output=capture, text=True,
-            encoding="utf-8", errors="replace",
+            encoding=_child_encoding(), errors="replace",
         )
     except OSError as exc:
         raise InstallError(f"无法执行命令：{argv[0]}", f"系统错误：{exc}") from exc
@@ -178,6 +205,46 @@ def check_python() -> None:
             "请安装 Python 3.10+ 后重新运行（Windows 安装时勾选 Add to PATH）。",
         )
     ok(f"Python 环境：{sys.version.split()[0]}（要求 >= 3.10）")
+
+
+def check_runtime_deps() -> str:
+    """--check 的运行时依赖校验：仅校验 PyYAML，不联网、不安装、不写任何文件。
+
+    注：预检阶段会写入并立即删除一个可写性探针文件（.gcs_install_probe），
+    除此之外不改动项目内任何文件。
+
+    校验范围：requirements.txt 声明的唯一第三方运行时依赖 PyYAML（版本 >=6.0,<7.0）；
+    测试期 / CI 期依赖、模型 SDK、可选组件均不在本校验范围内。
+    失败条件（任一即返回非零并给中文提示）：
+      1) importlib.util.find_spec("yaml") 为 None —— 未安装；
+      2) import yaml 抛异常 —— 已安装但不可导入；
+      3) yaml.__version__ 不在 [6.0, 7.0) —— 版本不兼容或无法解析。
+    """
+    import importlib.util
+    if importlib.util.find_spec("yaml") is None:
+        raise InstallError(
+            "运行时依赖缺失：未找到 PyYAML（yaml 模块）",
+            "--check 只做只读预检，不会安装任何东西；请运行 python install.py 完整安装，"
+            "或手动执行 pip install -r requirements.txt。",
+        )
+    try:
+        import yaml
+    except Exception as exc:  # 导入期异常统一转成可操作的中文提示
+        raise InstallError(
+            f"运行时依赖不可导入：PyYAML 加载失败（{exc}）",
+            "请重新安装依赖：pip install -r requirements.txt；或运行 python install.py 完整安装。",
+        ) from exc
+    ver = str(getattr(yaml, "__version__", ""))
+    m = re.match(r"^(\d+)\.(\d+)", ver)
+    got = (int(m.group(1)), int(m.group(2))) if m else None
+    if got is None or not (PY_YAML_MIN <= got < PY_YAML_MAX):
+        raise InstallError(
+            f"运行时依赖版本不兼容：PyYAML {ver or 'unknown'}，要求 "
+            f">= {PY_YAML_MIN[0]}.{PY_YAML_MIN[1]} 且 < {PY_YAML_MAX[0]}.{PY_YAML_MAX[1]}",
+            "请执行 pip install -r requirements.txt 更新到受支持版本后重新预检。",
+        )
+    ok(f"运行时依赖：PyYAML {ver}（>=6.0,<7.0，已导入；--check 不安装、不联网）")
+    return ver
 
 
 def is_valid_project(path: Path) -> bool:
@@ -227,6 +294,55 @@ def ensure_project(target: str | None) -> tuple[Path, bool]:
     return dest, True
 
 
+def write_llm_env(env_path: Path, cfg: dict) -> None:
+    """把 LLM 配置写入 .env：保留已有非 LLM 键（如 GCS_AUTH_*、注释），仅覆盖/追加 LLM 键。
+
+    这样 `install.py --llm` 不会抹掉 `auth_tool generate` 写入的鉴权凭据（M8 口径统一）。
+    """
+    keep: list[str] = []
+    if env_path.exists():
+        try:
+            for ln in env_path.read_text(encoding="utf-8").splitlines():
+                if not any(ln.strip().startswith(k + "=") for k in LLM_KEYS):
+                    keep.append(ln)
+        except (OSError, UnicodeError) as exc:
+            # 权限或编码异常下都不能静默清空 keep，否则会抹掉 .env 里的 GCS_AUTH_* 等键
+            reason = ("内容不是有效的 UTF-8 文本" if isinstance(exc, UnicodeError)
+                      else "无法读取")
+            raise InstallError(
+                f"已有 .env {reason}：{exc}",
+                "为避免覆盖其中的鉴权配置，本次未写入；请确认当前账户对 .env "
+                "有读取权限（Windows 可检查 ACL）、且文件为 UTF-8 编码后重试。",
+            ) from exc
+    while keep and keep[-1].strip() == "":
+        keep.pop()
+    if not keep:
+        text = ENV_HEADER + "".join(f"{k}={cfg[k]}\n" for k in LLM_KEYS)
+    else:
+        text = "\n".join(keep) + "\n" + "".join(f"{k}={cfg[k]}\n" for k in LLM_KEYS)
+    # 取值校验：值里带换行会被 .env 解析成第二个键（配置注入），
+    # 带首尾空白则会被读取时的 strip() 静默截断（Key 变短 → 一直 401）
+    for key, value in cfg.items():
+        raw = str(value)
+        if any(ch in raw for ch in "\r\n\0"):
+            raise InstallError(
+                f"{key} 的取值包含换行或空字符，拒绝写入 .env",
+                "这类取值会在 .env 解析时被当成额外的键（配置注入），"
+                "请删除换行后重试。",
+            )
+        if raw != raw.strip():
+            raise InstallError(
+                f"{key} 的取值包含首尾空白，拒绝写入 .env",
+                "读取时的 strip() 会静默截断该值（例如把 API Key 改短），请去掉空白后重试。",
+            )
+    # 原子写：先写临时文件再 os.replace，避免中途崩溃留下半截 .env
+    # newline="\n"：.env 用 LF；Windows 工具链读 .env 到 CRLF 可能引起多余空白。
+    tmp_path = env_path.with_name(env_path.name + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8", newline="\n")
+    os.replace(tmp_path, env_path)
+    harden_env_permissions(env_path)
+
+
 def precheck(root: Path) -> None:
     missing = [rel for rel in REQUIRED if not (root / rel).is_file()]
     if missing:
@@ -234,12 +350,40 @@ def precheck(root: Path) -> None:
             f"项目文件缺失：{', '.join(missing)}",
             "请确认下载的是完整源码（而非单个文件），或重新 clone 仓库。",
         )
+    # 知识包只做「语法 + 顶层结构」预检（不 import 项目模块，避免与安装脚本耦合）：
+    # 语法错误应在这里暴露，而不是等首次运行才失败
+    kb = root / "knowledge" / "ningxia_cluster.yaml"
+    if kb.is_file():
+        try:
+            import yaml  # 运行时依赖预检已确认 PyYAML 可用
+            data = yaml.safe_load(kb.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("知识包根节点必须是映射（键值对）")
+        except Exception as exc:
+            raise InstallError(
+                f"知识包解析失败：{type(exc).__name__}: {exc}",
+                "请检查 knowledge/ningxia_cluster.yaml 的 YAML 语法与顶层结构；"
+                "也可先执行 python -m gcs.demo --jobs 5（冒烟演示）确认知识包可正常加载。",
+            ) from exc
     probe = root / ".gcs_install_probe"
     try:
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
+        # 探针写固定 LF，避免 Windows CRLF 与 .gitattributes eol=lf 漂移；内容为空
+        probe.write_text("ok", encoding="utf-8", newline="\n")
     except OSError as exc:
-        raise InstallError(f"项目目录不可写：{root}", f"系统错误：{exc}；请换一个有写权限的目录。") from exc
+        # P3-9：探针失败 ≠ 目录不可写（也可能是安全软件/组策略拦截新建文件）。
+        # 用 os.access 做二次判定，只有两者都认为不可写时才下「不可写」结论，减少误报。
+        if not os.access(root, os.W_OK):
+            raise InstallError(f"项目目录不可写：{root}",
+                               f"系统错误：{exc}；请换一个有写权限的目录。") from exc
+        raise InstallError(
+            f"项目目录写入探针失败：{root}",
+            f"系统错误：{exc}；目录权限显示可写，可能是安全软件或组策略拦截了新建文件，"
+            "请改用用户主目录下的目录后重试。",
+        ) from exc
+    try:
+        probe.unlink()
+    except OSError:  # best-effort：残留探针不影响安装，不阻断主流程
+        _LOG.debug("安装探针清理失败：%s", probe, exc_info=True)
     ok("项目结构完整，目录可写")
 
 
@@ -306,7 +450,8 @@ def ensure_dirs(root: Path) -> None:
     runs.mkdir(parents=True, exist_ok=True)
     gitkeep = runs / ".gitkeep"
     if not gitkeep.exists():
-        gitkeep.write_text("", encoding="utf-8")
+        # 空文件；LF 保持与项目文本约定一致。
+        gitkeep.write_text("", encoding="utf-8", newline="\n")
         ok("已创建运行产物目录 runs/")
     else:
         skip("runs/ 与 .gitkeep 已存在")
@@ -318,7 +463,9 @@ def load_dotenv(path: Path, env: dict) -> None:
         return
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, UnicodeError) as exc:
+        print(f"[WARN] 读取 {path} 失败（{type(exc).__name__}），按未配置继续：{exc}",
+              file=sys.stderr)
         return
     for line in lines:
         line = line.strip()
@@ -330,33 +477,128 @@ def load_dotenv(path: Path, env: dict) -> None:
             env[key] = value
 
 
-def harden_env_permissions(path: Path) -> None:
-    """收紧 .env 的访问权限。
+def _env_readable(path: Path) -> bool:
+    """回读自检：确认当前进程仍能读 .env（收紧 ACL 后可能把自己锁在文件外）。
 
-    Unix 用 chmod 600；Windows 上 os.chmod 只影响只读位、不产生 ACL 收紧，
-    因此改调 icacls 去掉继承并只授权当前用户。失败不阻断安装（受限账户/组策略
-    可能拒绝），但必须给出可见告警，避免用户误以为文件已被保护。
+    契约：任何读取异常（权限 / 非 UTF-8 编码）一律返回 False，不向外抛，
+    避免被调用处的外层 except 误归因为 icacls 故障。
     """
-    if os.name == "nt":
-        user = os.environ.get("USERNAME") or ""
-        if not user:
-            warn(".env 权限未收紧：无法确定当前用户名，请手动检查文件 ACL。")
-            return
-        try:
-            proc = subprocess.run(
-                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
-                capture_output=True, text=True, timeout=20,
-            )
-        except Exception as exc:
-            warn(f".env 权限未收紧（icacls 调用失败：{type(exc).__name__}），请手动检查 ACL。")
-            return
-        if proc.returncode != 0:
-            warn(".env 权限未收紧（icacls 返回非 0），请手动检查 ACL。")
-        return
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        warn(".env 权限未收紧（chmod 失败），请手动检查文件权限。")
+        path.read_text(encoding="utf-8")
+        return True
+    except (OSError, UnicodeError):
+        return False
+
+
+def _windows_account() -> str:
+    """返回 icacls 可接受的当前账户标识；无法确定时返回空串。
+
+    USERNAME 在服务账户 / CI / 非交互 shell 下可能缺失，先退回 getpass；
+    域环境（USERDOMAIN 与本机名不同）需要 DOMAIN\\user 形式才解析得到账户。
+    """
+    user = os.environ.get("USERNAME") or ""
+    if not user:
+        try:
+            user = getpass.getuser()
+        except Exception:  # best-effort：极简环境无 pwd/环境变量，按未知账户处理
+            _LOG.debug("getpass.getuser() 失败，按未知账户处理", exc_info=True)
+            return ""
+    if not user:
+        return ""
+    domain = os.environ.get("USERDOMAIN") or ""
+    computer = os.environ.get("COMPUTERNAME") or ""
+    if domain and computer and domain.upper() != computer.upper() and "\\" not in user:
+        return f"{domain}\\{user}"
+    return user
+
+
+def _restore_env_acl(path: Path, account: str, notify=None) -> bool:
+    """尽力回滚：恢复继承并重新显式授权当前账户，保证 .env 仍可访问。
+
+    语义是「恢复可访问性」而非精确还原原 ACL；``/grant:r`` 为 replace，
+    重复调用不会累积 ACE。返回是否成功；失败时通过 notify 单独告警，
+    调用处据此区分「已回滚」与「回滚失败」，不静默吞错。
+    """
+    try:
+        proc = subprocess.run(
+            ["icacls", str(path), "/inheritance:e", "/grant:r", f"{account}:F"],
+            capture_output=True, timeout=20,
+        )
+        success, detail = proc.returncode == 0, ""
+    except Exception as exc:
+        success, detail = False, f"（{type(exc).__name__}）"
+    if not success and notify:
+        notify(f".env ACL 回滚失败{detail}，请手动检查文件权限。")
+    return success
+
+
+def harden_env_permissions(path: Path, notify=None) -> str:
+    """收紧 .env 权限，返回 ``ok`` / ``skipped`` / ``failed``。
+
+    Windows 策略（修复「接入大模型 / 一键安装可能因权限失败」）：
+    1. 先 ``/grant:r`` 给当前账户完全控制，**再** ``/inheritance:r`` 移除继承；
+       任一步失败都只告警并停止，绝不留下「无继承且无授权」的中间态。
+    2. 每步之后回读自检；不可读即回滚 ACL 并告警。
+    3. 账户无法确定、icacls 不可用 / 超时 / 非 0 均不阻断安装。
+    Unix 仍为 chmod 600 + 回读自检。``notify`` 供 auth_tool 复用同一实现时
+    保持自己的输出格式；默认使用 install.warn。
+    """
+    emit = notify or warn
+    if not path.is_file():
+        return "skipped"
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            emit(".env 权限未收紧（chmod 失败），请手动检查文件权限。")
+            return "failed"
+        if not _env_readable(path):
+            emit(".env 权限未收紧（收紧后不可读），请手动检查文件权限。")
+            return "failed"
+        return "ok"
+
+    account = _windows_account()
+    if not account:
+        emit(".env 权限未收紧：无法确定当前账户，请手动检查文件 ACL。")
+        return "skipped"
+    try:
+        grant = subprocess.run(
+            ["icacls", str(path), "/grant:r", f"{account}:F"],
+            capture_output=True, timeout=20,
+        )
+        if grant.returncode != 0:
+            if not _env_readable(path):
+                _restore_env_acl(path, account, emit)
+                emit(".env 权限未收紧（icacls 授权失败且回读失败），请手动检查 ACL。")
+            else:
+                emit(".env 权限未收紧（icacls 授权失败），请手动检查 ACL。")
+            return "failed"
+        if not _env_readable(path):
+            tail = "已回滚 ACL" if _restore_env_acl(path, account, emit) else \
+                   "ACL 回滚失败，请手动检查"
+            emit(f".env 权限未收紧（授权后回读失败，{tail}），请手动检查 ACL。")
+            return "failed"
+        drop = subprocess.run(
+            ["icacls", str(path), "/inheritance:r"],
+            capture_output=True, timeout=20,
+        )
+        if drop.returncode != 0:
+            if not _env_readable(path):
+                _restore_env_acl(path, account, emit)
+                emit(".env 权限未收紧（icacls 移除继承失败且回读失败），请手动检查 ACL。")
+            else:
+                emit(".env 权限未收紧（icacls 移除继承失败），请手动检查 ACL。")
+            return "failed"
+        if not _env_readable(path):
+            tail = "已回滚 ACL" if _restore_env_acl(path, account, emit) else \
+                   "ACL 回滚失败，请手动检查"
+            emit(f".env 权限未收紧（移除继承后回读失败，{tail}），请手动检查 ACL。")
+            return "failed"
+        return "ok"
+    except Exception as exc:
+        _restore_env_acl(path, account, emit)
+        emit(f".env 权限未收紧（icacls 调用失败：{type(exc).__name__}），请手动检查 ACL。")
+        return "failed"
 
 
 def prompt(text: str, default: str = "") -> str:
@@ -384,6 +626,25 @@ def ask_yes_no(question: str) -> bool:
         print("      请输入 y（接入）或 n（不接入），直接回车表示不接入。")
 
 
+def _base_url_is_safe(url: str) -> bool:
+    """接口地址能否安全携带 API Key：https 任意主机，或本机回环的 http。
+
+    与运行时 gcs/llm.py::_secure_base_url 保持同一口径——安装期不得比运行期更严，
+    否则本地代理 / 自建推理服务（如 http://127.0.0.1:11434/v1）在安装期会被误拒。
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme == "https" and parsed.hostname:
+        return True
+    if parsed.scheme == "http" and (parsed.hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        return True
+    return False
+
+
 def collect_llm_config() -> dict:
     base_d = os.environ.get("GCS_LLM_BASE_URL") or DEFAULT_BASE
     model_d = os.environ.get("GCS_LLM_MODEL") or DEFAULT_MODEL
@@ -397,7 +658,8 @@ def collect_llm_config() -> dict:
         if sys.stdin.isatty():
             try:
                 key = getpass.getpass("    回车沿用现有 Key，或输入新 Key（不回显）：").strip() or key_d
-            except Exception:
+            except Exception:  # best-effort：无 TTY 时 getpass 会失败，沿用环境变量里的 Key
+                _LOG.debug("getpass 读取失败，沿用环境变量中的 Key", exc_info=True)
                 key = key_d
         else:
             key = key_d
@@ -416,10 +678,11 @@ def collect_llm_config() -> dict:
                 "请设置环境变量 GCS_LLM_API_KEY 后重试，避免 Key 明文回显。",
             ) from exc
 
-    if not re.match(r"^https://[^\s]+$", base):
+    if not _base_url_is_safe(base):
         raise InstallError(
-            "接口地址必须是 HTTPS",
-            f"只允许 https:// 开头的地址，避免 API Key 以明文在网络上传输；当前：{base!r}",
+            "接口地址必须是 HTTPS（本机回环 http 除外）",
+            "只允许 https:// 开头的地址，或本机回环的 http://127.0.0.1 / http://localhost，"
+            f"避免 API Key 以明文在网络上传输；当前：{base!r}",
         )
     if not key:
         raise InstallError("API Key 不能为空", "请重新运行脚本并填写，或选择不接入大模型。")
@@ -478,15 +741,8 @@ def configure_llm(root: Path, py: Path, args) -> str:
         return f"沿用已有配置（{state}）"
 
     cfg = collect_llm_config()
-    if env_path.exists():  # 写入前再确认，防止并发或外部进程刚创建了文件
-        skip(".env 在配置过程中已出现，放弃写入以保护原文件")
-        return "沿用已有配置（未改动）"
     try:
-        env_path.write_text(
-            ENV_HEADER + "".join(f"{k}={cfg[k]}\n" for k in LLM_KEYS),
-            encoding="utf-8",
-        )
-        harden_env_permissions(env_path)
+        write_llm_env(env_path, cfg)
     except OSError as exc:
         raise InstallError(f"写入 .env 失败：{exc}", "请确认目录可写后重试。") from exc
 
@@ -522,16 +778,18 @@ def generate_launchers(root: Path) -> None:
     if bat.exists():
         skip("run.bat 已存在，不覆盖")
     else:
-        bat.write_text(RUN_BAT.replace("\n", "\r\n"), encoding="utf-8")
+        # newline=""：内容里已经是 CRLF，避免 Python 再按 os.linesep 翻译成 \r\r\n
+        bat.write_text(RUN_BAT.replace("\n", "\r\n"), encoding="utf-8", newline="")
         ok("已生成 Windows 运行入口 run.bat")
     if sh.exists():
         skip("run.sh 已存在，不覆盖")
     else:
-        sh.write_text(RUN_SH, encoding="utf-8")
+        # newline="\n"：run.sh 必须在 POSIX 上保持 LF，否则 shebang 会带 \r
+        sh.write_text(RUN_SH, encoding="utf-8", newline="\n")
         try:
             os.chmod(sh, 0o755)
-        except OSError:
-            pass
+        except OSError:  # best-effort：Windows / FAT 卷不支持 POSIX 权限位，忽略即可
+            _LOG.debug("run.sh chmod 0755 失败（Windows 下无意义）", exc_info=True)
         ok("已生成 macOS/Linux 运行入口 run.sh")
 
 
@@ -608,14 +866,16 @@ def main(argv=None) -> int:
             return run_mode(args)
 
         if args.check:  # 预检只读，绝不 clone / 写入
-            root = find_project_root()
-            if not root:
+            if not is_valid_project(CWD):
+                missing = [rel for rel in REQUIRED if not (CWD / rel).is_file()]
                 raise InstallError(
-                    "--check 需要在项目目录内运行",
-                    "请 cd 到项目根目录后再执行；需要自动获取源码请直接运行不带参数的完整安装。",
+                    f"--check 必须在项目目录内运行（当前目录 {CWD} 缺少：{', '.join(missing)}）",
+                    "请先 cd 到包含 install.py 的项目根目录后再执行；"
+                    f"也可直接运行完整安装：python install.py。",
                 )
-            ok(f"项目目录：{root}")
-            precheck(root)
+            ok(f"项目目录：{CWD}")
+            precheck(CWD)
+            check_runtime_deps()
             ok("预检通过：未做任何修改。去掉 --check 即可开始安装。")
             return 0
 

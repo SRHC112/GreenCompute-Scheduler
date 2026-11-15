@@ -14,6 +14,11 @@
     loopback  回环来源免凭据；非回环来源在受保护接口上要求 Bearer Token（默认）
     required  一律要求 Bearer Token（公开只读 GET 仍放行）
 
+对外部署硬约束：
+    GCS_STRICT_AUTH=1 时只接受 required 模式，loopback / off 拒绝启动。
+    原因：loopback 的「回环免凭据」判定依赖 client_address，而反向代理、
+    容器网络、SSH 端口转发下来源地址可能呈现为回环，存在被误判为可信本机的风险。
+
 过期与轮换：
     GCS_AUTH_ISSUED_AT + GCS_AUTH_MAX_AGE_DAYS（默认 90 天）；
     loopback 过期仅告警，required 过期拒绝启动（fail-closed）；
@@ -39,6 +44,12 @@ AUTH_SCHEME = "Bearer"
 REALM = "GreenCompute"
 WWW_AUTHENTICATE = f'{AUTH_SCHEME} realm="{REALM}"'
 
+# 对外部署硬约束开关：置 1 时只接受 required 模式，其余模式拒绝启动。
+# 起因：loopback 的「免凭据」判定依赖 client_address，而反代 / 容器 /
+# SSH 端口转发下来源地址可能呈现为回环，存在被误判为可信本机的风险。
+STRICT_FLAG = "GCS_STRICT_AUTH"
+TRUTHY = ("1", "true", "yes", "on")
+
 AUTH_KEYS = (
     "GCS_AUTH_MODE",
     "GCS_AUTH_TOKEN_HASH",
@@ -46,6 +57,7 @@ AUTH_KEYS = (
     "GCS_AUTH_PREV_VALID_UNTIL",
     "GCS_AUTH_ISSUED_AT",
     "GCS_AUTH_MAX_AGE_DAYS",
+    STRICT_FLAG,
 )
 
 # 分级鉴权：唯一有副作用的写接口
@@ -53,11 +65,13 @@ PROTECTED_POST = frozenset({"/api/run"})
 
 
 def load_env_file(path: Path, env: dict | None = None,
-                  use_os_environ: bool = True) -> dict:
+                  use_os_environ: bool = True,
+                  warn: list[str] | None = None) -> dict:
     """极简 .env 解析（标准库）：系统环境变量优先，.env 只补缺、不覆盖已有值。
 
     ``env`` 是显式覆盖层（用于测试注入），优先级高于系统环境；
     ``use_os_environ=False`` 用于凭据工具只读 .env 自身、不受进程环境干扰。
+    ``warn`` 若给出，读取失败时追加可操作的中文提示。
     与 ``install.py::load_dotenv`` 语义一致，但刻意不 import 安装脚本，
     避免鉴权与 LLM 配置耦合。
     """
@@ -68,7 +82,15 @@ def load_env_file(path: Path, env: dict | None = None,
         return base
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, UnicodeError) as exc:
+        if warn is not None:
+            if isinstance(exc, UnicodeError):
+                warn.append(
+                    f"[WARN] .env（{path}）不是 UTF-8 编码，已按未配置继续；"
+                    "请用 UTF-8 保存后重试（例如 PowerShell：Set-Content -Encoding utf8 .env）。")
+            else:
+                warn.append(
+                    f"[WARN] 读取 .env（{path}）失败（{type(exc).__name__}：{exc}），已按未配置继续。")
         return base
     for line in lines:
         line = line.strip()
@@ -165,8 +187,10 @@ class AuthConfig:
 
     def __init__(self, env: dict | None = None, root: Path | None = None):
         root = root or Path(__file__).resolve().parent.parent
-        merged = load_env_file(root / ".env", env)
         self.root = root
+        self.warnings: list[str] = []
+        self.errors: list[str] = []
+        merged = load_env_file(root / ".env", env, warn=self.warnings)
         self.mode = (merged.get("GCS_AUTH_MODE") or DEFAULT_MODE).strip().lower()
         self.token_hash = (merged.get("GCS_AUTH_TOKEN_HASH") or "").strip()
         self.prev_hash = (merged.get("GCS_AUTH_TOKEN_PREV_HASH") or "").strip()
@@ -177,14 +201,20 @@ class AuthConfig:
                                     or DEFAULT_MAX_AGE_DAYS)
         except ValueError:
             self.max_age_days = DEFAULT_MAX_AGE_DAYS
-        self.warnings: list[str] = []
-        self.errors: list[str] = []
 
         if self.mode not in MODES:
             # 未知取值按最严格模式处理，绝不静默降级为 off
             self.errors.append(f"未知 GCS_AUTH_MODE={self.mode!r}，按 required 处理")
             self.mode = "required"
         self.enabled = self.mode != "off"
+
+        # 对外部署硬约束：置位后只允许 required，loopback / off 一律拒绝启动
+        self.strict = (merged.get(STRICT_FLAG) or "").strip().lower() in TRUTHY
+        if self.strict and self.mode != "required":
+            self.errors.append(
+                f"{STRICT_FLAG}=1：对外部署必须 GCS_AUTH_MODE=required"
+                f"（当前 {self.mode}），拒绝启动（fail-closed）；"
+                f"回环免凭据在反代 / 容器 / 端口转发下可能被误判")
 
         if self.enabled and not self.token_hash:
             msg = "未配置 GCS_AUTH_TOKEN_HASH"
@@ -237,6 +267,8 @@ class AuthConfig:
             out.append("本机回环免凭据；非回环来源在写接口 / 运行轨迹 / 看板文件上要求 Bearer Token")
         else:
             out.append("所有受保护接口一律要求 Bearer Token（公开只读 GET 仍放行）")
+        if self.strict:
+            out.append(f"{STRICT_FLAG}=1：对外部署硬约束已开启，仅接受 required 模式")
         age = self.age_days
         if age is not None:
             out.append(f"凭据已签发 {age:.1f} 天 / 上限 {self.max_age_days} 天"
@@ -265,6 +297,8 @@ class AuthConfig:
             return AuthResult(False, "missing")
         if not self.token_hash:
             return AuthResult(False, "unconfigured")
+        if self.expired:
+            return AuthResult(False, "expired")
         if verify_token(token, self.token_hash):
             return AuthResult(True, "token")
         if self.prev_valid and self.prev_hash and verify_token(token, self.prev_hash):

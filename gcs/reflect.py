@@ -85,7 +85,8 @@ class Reflector:
                              else pack.rework_budget["pass_score"])
 
     def score(self, report: VerifyReport, metrics: RunMetrics, jobs: list[Job],
-              estimates: list[dict], round_index: int) -> Decision:
+              estimates: list[dict], round_index: int,
+              max_rounds: int | None = None) -> Decision:
         """按六维 rubric 打分；未达阈值时把阻塞缺陷归因到责任节点并生成定向返工指令。"""
         blocking = report.blocking
         by_layer: dict[str, list[Defect]] = {}
@@ -135,7 +136,8 @@ class Reflector:
         nodes = sorted({x["target_node"] for x in directives})
         strategy = ("reprofile_and_reschedule"
                     if any(n == "n_rework_profile" for n in nodes) else "reschedule_only")
-        remaining = max(0, int(self.pack.rework_budget["max_rounds"]) - round_index)
+        _cap = int(max_rounds) if max_rounds is not None else int(self.pack.rework_budget["max_rounds"])
+        remaining = max(0, _cap - round_index)
         command = {
             "round": round_index,
             "strategy": strategy,
@@ -146,7 +148,7 @@ class Reflector:
                 "tokens": int(self.pack.rework_budget["max_tokens"]),
                 "seconds": int(self.pack.rework_budget["max_seconds"]),
             },
-            "note": "只重跑 target_nodes 及其下游，其余节点复用上一轮结果",
+            "note": "只重跑责任作业（按 target_nodes 归类），其余作业复用上一轮结果；返工为作业级定向重排",
         }
         decision.directives = directives
         decision.jobs_to_rework = sorted(jobs_to_rework)

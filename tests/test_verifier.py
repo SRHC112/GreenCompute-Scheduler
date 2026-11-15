@@ -36,7 +36,6 @@ class TestVerifierLayers(unittest.TestCase):
             jobs if jobs is not None else self.jobs,
             plan if plan is not None else self.art.plan,
             results if results is not None else self.art.results,
-            self.art.metrics,
         )
 
     def _codes(self, report):

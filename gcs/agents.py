@@ -169,9 +169,14 @@ class Scheduler:
             return None
         best["feasible"] = bool(feasible)
         scored.sort(key=lambda c: c["score"])
+        # 备选必须排除「自己」：best 未必是 scored[0]（无可行解时退化为最早完成），
+        # 直接切 scored[1:4] 会把 best 本体混进备选，出现「备选比选定更优」的矛盾。
+        best_key = (best["pool_id"], best["start_min"])
+        alternatives = [c for c in scored
+                        if (c["pool_id"], c["start_min"]) != best_key][:3]
         best["alternatives"] = [
             {"pool_id": c["pool_id"], "start_min": c["start_min"], "score": round(c["score"], 4)}
-            for c in scored[1:4]
+            for c in alternatives
         ]
         best["rationale"] = self._rationale(job, best, scored)
         return best
@@ -206,15 +211,13 @@ class Scheduler:
         cost = energy * price + job.gpus * duration / 60 * pool.amort_per_gpu_hour
         green = self.pack.green_at(start + duration // 2)
         carbon = energy * (1 - green) * self.pack.grid_carbon_factor
-        # P1-2.6：碳排分项不再复用 (1-green)。基准取「同一作业落在能耗最高的
-        # 资源池、且完全无绿电」时的碳排量，于是
-        #   carbon_norm = (1-green) × (本池 功耗×PUE / 最高 功耗×PUE) ∈ [0,1]
-        # 既保留绿电时段的贡献，又把「选高 PUE 池 → 能耗高 → 碳排高」的
-        # 链路真正接进目标函数（原实现两个分项同值，资源池能耗差异被抹平）。
+        # 碳排量 carbon 按真实公式计算（仅用于展示 carbon_kg）；目标项碳排分项见下方 carbon_norm。
         max_power = max(p.gpu_power_kw * p.pue for p in self.pack.pools)
-        carbon_ref = (job.gpus * duration / 60 * max_power
-                      * self.pack.grid_carbon_factor)
-        carbon_norm = carbon / max(1e-6, carbon_ref)
+        # 2.6：碳排分项改用「能耗强度」归一化 energy/energy_ref ∈ [0,1]，
+        # 与绿电占比 (1-green) 解耦，避免 carbon 项与 green 项共线、绿电被重复放大；
+        # 碳排量 carbon 仍按真实公式计算，仅用于展示（carbon_kg）。
+        energy_ref = job.gpus * duration / 60 * max_power
+        carbon_norm = energy / max(1e-6, energy_ref)
         wait = max(0, start - job.arrive_min)
         window = max(1, job.deadline_min - job.arrive_min)
         congestion = self._congestion(cluster, pool_id, start, duration)

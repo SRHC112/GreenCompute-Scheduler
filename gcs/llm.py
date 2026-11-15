@@ -23,9 +23,30 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
+
+
+def _secure_base_url(url: str) -> bool:
+    """判断 base_url 是否可安全承载 API Key（P3-7）。
+
+    只允许 https；纯 http 仅放行本机回环（127.0.0.1 / localhost / ::1），
+    避免密钥在明文链路或局域网内传输。空串视为「未配置」，由调用方走离线。
+    """
+    if not url:
+        return True
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return False
+    if parts.scheme == "https":
+        return True
+    if parts.scheme == "http":
+        return (parts.hostname or "").lower() in ("127.0.0.1", "localhost", "::1")
+    return False
 
 
 class BudgetExceeded(RuntimeError):
@@ -106,16 +127,26 @@ class ModelGateway:
         lite_model 留空时 `tier="light"` 的调用自动回落主模型。
         adapter 缺省为 `OpenAICompatAdapter`，可注入自定义子类。"""
         self.base_url = os.getenv("GCS_LLM_BASE_URL", "").rstrip("/")
+        self.base_url_secure = _secure_base_url(self.base_url)
+        if self.base_url and not self.base_url_secure:
+            # P3-7：非 https 且非本机回环 → 拒绝在上面传输 Key，直接降级离线
+            print(f"[WARN] GCS_LLM_BASE_URL 非 https 且非本机回环，已降级为离线 mock"
+                  f"（不会在该地址上发送 API Key）：{self.base_url}", file=sys.stderr)
         self.api_key = os.getenv("GCS_LLM_API_KEY", "")
-        self.model = model or os.getenv("GCS_LLM_MODEL", "deepseek-chat")
+        # 末尾的 `or ""` 只为让类型收敛为 str（mypy 对 or 链的窄化不完整）：
+        # os.getenv 带默认值时不会返回 None，因此运行期取值与原实现逐值相同。
+        self.model = model or os.getenv("GCS_LLM_MODEL", "deepseek-chat") or ""
         self.lite_model = lite_model or os.getenv("GCS_LLM_LITE_MODEL", "")
         self.adapter = adapter or OpenAICompatAdapter()
+        # 优先级说明（有意与 model/lite_model 不同）：token 预算是「用户可调旋钮」，
+        # .env.example 明确提供 GCS_LLM_TOKEN_BUDGET，故此处环境变量优先于构造参数；
+        # model/lite_model 则是「调用方显式指定优先」。两者都是刻意设计，不是隐式覆盖。
         self.token_budget = _env_int("GCS_LLM_TOKEN_BUDGET", token_budget)
         self.tokens_in = 0
         self.tokens_out = 0
         self.calls = 0
         self.latency_ms = 0.0
-        self.online = bool(self.base_url and self.api_key)
+        self.online = bool(self.base_url and self.api_key and self.base_url_secure)
         self.mode = "online" if self.online else "offline-mock"
         # 分层记账：primary / light 各自记录实际使用的模型与 token 用量
         self.tier_stats: dict[str, dict] = {
@@ -201,6 +232,10 @@ class ModelGateway:
         tokens_out / tokens_total / latency_ms / budget / adapter / tier_stats。"""
         return {
             "mode": self.mode,
+            # rubric_source：L5 语义判定的真实来源。online 时为 "llm"（真实模型 Judge），
+            # offline-mock / degraded 时为 "offline-mock"（确定性规则兜底），与
+            # gcs/verifier.py 的 L5 分支条件（self.llm.online）保持一致（F6）。
+            "rubric_source": "llm" if self.online else "offline-mock",
             "model": self.model,
             "model_lite": self.lite_model,
             "calls": self.calls,

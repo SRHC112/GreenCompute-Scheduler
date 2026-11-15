@@ -8,30 +8,30 @@
   "rows": [
     {
       "wait_scale": 0.5,
-      "avg_wait_min": 19.375,
-      "cost_per_gpu_hour": 2.3857729470894546,
-      "green_window_ratio": 0.3955884253204065,
-      "sla_rate": 0.9833333333333333
+      "avg_wait_min": 18.625,
+      "cost_per_gpu_hour": 2.3591205736986085,
+      "green_window_ratio": 0.4064607880505497,
+      "sla_rate": 0.9833333333333334
     },
     {
       "wait_scale": 1.0,
-      "avg_wait_min": 12.375,
-      "cost_per_gpu_hour": 2.3886082107340325,
-      "green_window_ratio": 0.37790841136100617,
-      "sla_rate": 0.9958333333333333
+      "avg_wait_min": 10.75,
+      "cost_per_gpu_hour": 2.329522833095937,
+      "green_window_ratio": 0.3759695775828034,
+      "sla_rate": 0.9916666666666667
     },
     {
       "wait_scale": 2.0,
-      "avg_wait_min": 3.4375,
-      "cost_per_gpu_hour": 2.4661948630145574,
+      "avg_wait_min": 4.125,
+      "cost_per_gpu_hour": 2.3410078150634175,
       "green_window_ratio": 0.35216573468597856,
       "sla_rate": 1.0
     },
     {
       "wait_scale": 4.0,
-      "avg_wait_min": 0.75,
-      "cost_per_gpu_hour": 2.5583021524998095,
-      "green_window_ratio": 0.33572714967670214,
+      "avg_wait_min": 1.5625,
+      "cost_per_gpu_hour": 2.448476733937312,
+      "green_window_ratio": 0.3398953072129695,
       "sla_rate": 1.0
     },
     {

@@ -37,6 +37,25 @@ class Policy:
     wait_scale: float = 1.0              # 排队权重倍率，>1 表示更不愿意让作业等
     description: str = ""
 
+    def __post_init__(self) -> None:
+        """枚举字段校验：非法取值直接报错，不静默降级到别的策略。
+
+        背景：三个枚举字段原先都写成「精确匹配 / else 回落」，打错一个字母
+        （如 weights_mode="unifrom"）会让消融组悄悄退化成「本方案」，
+        六组对照实验失去区分度，而 CI 只校验行数与组分布，查不出来。
+        与 gcs/knowledge.py::segment_of 的处理方式一致：歧义在配置层拒绝。
+        """
+        if self.weights_mode not in ("knowledge", "uniform", "no_green"):
+            raise ValueError(
+                f"weights_mode 非法：{self.weights_mode!r}"
+                "（可选：knowledge / uniform / no_green）")
+        if self.candidate_mode not in ("full", "earliest"):
+            raise ValueError(
+                f"candidate_mode 非法：{self.candidate_mode!r}（可选：full / earliest）")
+        if self.rule not in (None, "fcfs", "sjf"):
+            raise ValueError(
+                f"rule 非法：{self.rule!r}（可选：None / fcfs / sjf）")
+
 
 @dataclass
 class Event:
@@ -216,14 +235,15 @@ class Orchestrator:
                        f"单位成本 ¥{metrics.cost_per_gpu_hour:.2f}/GPU·h")
 
             # ---------------- VERIFY ----------------
-            report = self.verifier.verify(jobs, plan, results, metrics)
+            report = self.verifier.verify(jobs, plan, results)
             self._emit("VERIFY", "n_verify", "A5",
                        f"五层校验完成，缺陷 {len(report.defects)} 条"
                        f"（阻塞 {len(report.blocking)} 条）")
             defect_history.append(report.as_dict())
 
             # ---------------- REFLECT ----------------
-            decision = self.reflector.score(report, metrics, jobs, estimates, rnd)
+            decision = self.reflector.score(report, metrics, jobs, estimates, rnd,
+                                            max_rounds=max_rounds)
             rubric_history.append(decision)
             self._emit("REFLECT", "n_reflect", "A6",
                        f"rubric {decision.score}/{decision.threshold}"
@@ -282,7 +302,7 @@ class Orchestrator:
             if abs(kg - 1.0) < 1e-9 and abs(kw - 1.0) < 1e-9:
                 return None
             # 敏感性分析用：先整体缩放绿电+碳排权重，再单独缩放排队权重；
-            # 两次缩放都把差额按原比例还给其余分项，保证权重和仍为 1。
+            # 两次缩放都尽量把差额按原比例还给其余分项（摊不动时总权重大于 1）。
             out = {}
             for j in jobs:
                 w = dict(self.pack.weights_for(j.type))
@@ -297,6 +317,7 @@ class Orchestrator:
                         w["green"] *= kg
                         w["carbon"] *= kg
                 if abs(kw - 1.0) > 1e-9:
+                    # 放大等待权重：差额尽量按比例摊到其余分项（必要时总权重大于 1）
                     w = self._scale_one(w, "wait", kw)
                 out[j.id] = w
             return out
@@ -317,9 +338,11 @@ class Orchestrator:
 
     @staticmethod
     def _scale_one(w: dict, key: str, k: float) -> dict:
-        """把单个权重乘以 k，差额按比例摊到其余分项上，保持权重和为 1。
+        """把单个权重乘以 k，差额尽量按比例摊到其余分项上。
 
         用于“如果更在意排队会怎样”这类反事实扫描：只改偏好，不改任何约束。
+        注意：当其余分项被摊到 0 仍不足以吸收差额时（例如 wait 权重放大 8 倍），
+        总权重会大于 1——各分项此时是**相对偏好**而非概率分布，排序含义不变。
         """
         rest = sum(v for kk, v in w.items() if kk != key)
         if w.get(key, 0.0) <= 0 or rest <= 0:
@@ -351,7 +374,7 @@ class Orchestrator:
             _, segment = self.pack.price_at(pool_id, start)
             plan[job.id] = {"job_id": job.id, "pool_id": pool_id, "start_min": start,
                             "duration_min": dur, "segment": segment,
-                            "rationale": f"规则策略 {self.policy.rule.upper()} 选定最早的可行资源池",
+                            "rationale": f"规则策略 {(self.policy.rule or '').upper()} 选定最早的可行资源池",
                             "score": None}
         return plan
 

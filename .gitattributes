@@ -1,0 +1,25 @@
+# 换行符与编码约定（跨平台一致性）
+#
+# 为什么需要：Windows 的 git 默认 core.autocrlf=true，会把 LF 文件转成 CRLF；
+# Linux/macOS 默认 false，会把 CRLF 原样保留。若不做显式约定：
+#   - install.bat 被转成 CRLF 尚可，但仓库里的 LF 版在 cmd.exe 下会因
+#     UTF-8 中文 + LF 组合被 DBCS 解析吞掉行尾，导致批处理被截断成碎片命令；
+#   - install.sh 被转成 CRLF 后 shebang 变成 "#!/usr/bin/env bash\r"，
+#     在 Linux/macOS 上直接报 bad interpreter。
+# 因此：批处理固定 CRLF，shell 脚本与源码固定 LF。
+
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.sh     text eol=lf
+*.py     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+# CSV 按 RFC 4180 使用 CRLF 行尾，禁止 git 转换（否则每次提交都是整文件 diff）
+*.csv    -text
+*.txt    text eol=lf
+*.ini    text eol=lf
+*.html   text eol=lf
+*.example text eol=lf
+LICENSE  text eol=lf

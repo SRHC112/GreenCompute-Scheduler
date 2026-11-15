@@ -151,6 +151,16 @@ class TestDegradation(unittest.TestCase):
             llm = ModelGateway()
             self.assertTrue(llm.online)
             self.assertEqual(llm.base_url, "https://api.deepseek.com/v1", "末尾斜杠应被去掉")
+        # P3-7：非 https 且非本机回环时，拒绝在该地址上传输 Key → 强制离线
+        with mock.patch.dict("os.environ", {"GCS_LLM_BASE_URL": "http://api.example.com/v1",
+                                            "GCS_LLM_API_KEY": "sk-test"}):
+            insecure = ModelGateway()
+            self.assertFalse(insecure.online, "明文 http 的公网地址不应判为在线")
+            self.assertEqual(insecure.mode, "offline-mock")
+        # 本机回环的 http 仍视为可信（本地代理/自建服务场景）
+        with mock.patch.dict("os.environ", {"GCS_LLM_BASE_URL": "http://127.0.0.1:11434/v1",
+                                            "GCS_LLM_API_KEY": "sk-test"}):
+            self.assertTrue(ModelGateway().online, "本机回环 http 应保留在线能力")
 
 
 class TestModelRouting(unittest.TestCase):

@@ -62,6 +62,16 @@ class TestConsoleRender(unittest.TestCase):
     def test_kpi_labels_present(self):
         for label in ("SLA 达成率", "单位算力成本", "平均绿电占比", "平均排队", "返工轮次"):
             self.assertIn(label, self.text, f"缺少 KPI 标签：{label}")
+        # 一致性更新：术语取自单一来源、完整定义进看板口径区、转义只做一次
+        from gcs.metrics_meta import DEFINITION, TERM
+        from gcs.report import _h, _js_json
+        from gcs.webassets import DAG_JS
+        self.assertIn(TERM["green_window_ratio"], self.text)
+        for text in DEFINITION.values():
+            self.assertIn(_h(text), self.text, "看板指标口径区缺少统一定义")
+        self.assertEqual(_h('<script>&"\''), '&lt;script&gt;&amp;&quot;&#x27;')
+        self.assertNotIn("</script>", _js_json({"x": "</script>"}))
+        self.assertIn("function esc(", DAG_JS)
 
     def test_dag_canvas_and_draw_function(self):
         # 运行看板必需渲染 DAG 拓扑
@@ -103,6 +113,20 @@ class TestConsoleRender(unittest.TestCase):
         self.assertTrue(self.html.read_bytes().startswith(b"<!DOCTYPE"))
         self.assertIn("绿算调度", self.text)
 
+    def test_run_once_writes_artifacts(self):
+        import tempfile, shutil
+        from app import server
+        tmp = tempfile.mkdtemp()
+        old = server.RUNS_DIR
+        server.RUNS_DIR = Path(tmp)
+        try:
+            payload = server.run_once(5, 7, "generic")
+            d = Path(tmp) / payload["run_id"]
+            for f in ("artifact.json", "metrics.json", "console.html"):
+                self.assertTrue((d / f).is_file(), f"run_once 未写出 {f}")
+        finally:
+            server.RUNS_DIR = old
+            shutil.rmtree(tmp, ignore_errors=True)
     @classmethod
     def tearDownClass(cls):
         if getattr(cls, "_cleanup", False):

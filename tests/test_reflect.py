@@ -44,6 +44,14 @@ class TestRubric(unittest.TestCase):
     def setUp(self):
         self.reflector = Reflector(PACK)
 
+    def test_max_rounds_override_in_budget(self):
+        d = self.reflector.score(report_with(sla_defect("A3","n_rework_schedule")),
+                                 metrics(), [], [], 0, max_rounds=0)
+        self.assertEqual(d.command["budget_remaining"]["rounds"], 0)
+        d2 = self.reflector.score(report_with(sla_defect("A3","n_rework_schedule")),
+                                  metrics(), [], [], 0)
+        self.assertEqual(d2.command["budget_remaining"]["rounds"], int(PACK.rework_budget["max_rounds"]))
+
     def test_threshold_comes_from_knowledge_pack(self):
         self.assertEqual(self.reflector.threshold, int(PACK.rework_budget["pass_score"]))
         self.assertEqual(self.reflector.threshold, 80)

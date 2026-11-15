@@ -133,6 +133,24 @@ class TestAuthConfig(unittest.TestCase):
         self.assertEqual(cfg.mode, "required")
         self.assertFalse(cfg.may_start)
 
+    def test_strict_flag_only_allows_required(self):
+        """P2：GCS_STRICT_AUTH=1 时 loopback / off 一律拒绝启动。"""
+        for mode in ("loopback", "off"):
+            cfg = self.cfg(GCS_AUTH_MODE=mode, GCS_AUTH_TOKEN_HASH=self.h,
+                           GCS_STRICT_AUTH="1")
+            self.assertTrue(cfg.strict, mode)
+            self.assertFalse(cfg.may_start, f"{mode} 不应通过对外部署硬约束")
+            self.assertTrue(any("GCS_STRICT_AUTH" in m
+                                for m in cfg.startup_messages()), mode)
+        ok = self.cfg(GCS_AUTH_MODE="required", GCS_AUTH_TOKEN_HASH=self.h,
+                      GCS_STRICT_AUTH="true")
+        self.assertTrue(ok.strict)
+        self.assertTrue(ok.may_start)
+        # 未置位时保持原有三态语义，不在启动期报错
+        lax = self.cfg(GCS_AUTH_MODE="loopback", GCS_AUTH_TOKEN_HASH=self.h)
+        self.assertFalse(lax.strict)
+        self.assertTrue(lax.may_start)
+
     def test_expiry_loopback_warns_required_blocks(self):
         old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
         loop = self.cfg(GCS_AUTH_MODE="loopback", GCS_AUTH_TOKEN_HASH=self.h,
@@ -167,6 +185,14 @@ class TestAuthConfig(unittest.TestCase):
         self.assertFalse(cfg2.prev_valid)
         self.assertFalse(cfg2.check({"Authorization": "Bearer " + old_token},
                                     ("127.0.0.1", 1), "POST", "/api/run").ok)
+
+    def test_expired_credential_rejected_at_runtime(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+        cfg = self.cfg(GCS_AUTH_MODE="required", GCS_AUTH_TOKEN_HASH=self.h,
+                       GCS_AUTH_ISSUED_AT=old)
+        self.assertTrue(cfg.expired)
+        self.assertFalse(cfg.check({"Authorization": "Bearer " + self.token},
+                                   ("10.0.0.5", 1), "POST", "/api/run").ok)
 
     def test_no_prev_window_by_default(self):
         cfg = self.cfg(GCS_AUTH_MODE="required", GCS_AUTH_TOKEN_HASH=self.h,

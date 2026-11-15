@@ -19,19 +19,26 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from html import escape
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from gcs.knowledge import KnowledgePack  # noqa: E402
+from gcs.knowledge import KnowledgeError, KnowledgePack, KNOWLEDGE_HINT, load_knowledge  # noqa: E402
 from gcs.orchestrator import Orchestrator  # noqa: E402
 from gcs.simulator import make_jobs  # noqa: E402
+from gcs.metrics_meta import LABEL, TERM  # noqa: E402
 
 KB_PATH = ROOT / "knowledge" / "ningxia_cluster.yaml"
-try:  # 版本号以知识包为准，避免脚本里硬编码导致与实验产物脱节
-    KB_VERSION = KnowledgePack.load(KB_PATH).version
-except Exception:  # 知识包缺失时仍允许脚本启动，只是版本标记为 unknown
-    KB_VERSION = "unknown"
+
+
+def kb_version() -> str:
+    """读取知识包版本号（惰性）。
+
+    知识包缺失或非法时在这里直接抛错，而不是把版本标记成 "unknown" 让脚本
+    带着污染的版本继续跑——产物里必须写明真实版本，否则无法追溯口径。
+    """
+    return KnowledgePack.load(KB_PATH).version
 
 GROUPS = [
     ("G-A", "FCFS 规则调度（无 Agent 协作）", "fcfs",
@@ -51,6 +58,9 @@ GROUPS = [
 SEEDS_FIXED = [20261111, 7, 42]                 # 固定种子，3 次重动（均值 ± 标准差）
 SEEDS_BOOTSTRAP = list(range(20261111, 20261111 + 200))  # 200 次重启动做非参数置信区间
 JOBS = 80
+MIN_JOBS = 1
+MAX_JOBS = 300  # 与 gcs/demo.py::MAX_JOBS 同源：同一参数在 CLI/HTTP/前端三处口径统一。
+# evaluation 脚本须能独立运行，故此处取局部常量，不 import gcs.demo。
 
 FIELDS = ["group", "group_name", "seed", "jobs", "sla_rate", "budget_rate", "green_ok_rate",
           "avg_wait_min", "p95_wait_min", "cost_per_gpu_hour", "avg_green_share",
@@ -83,7 +93,7 @@ def run_all(outdir: Path, jobs_n: int, workers: int = 0) -> list[dict]:
     同一份作业流喂给所有组：对照组之间唯一的差异是 Policy 开关，
     这样指标差异才能归因到“领域知识/自省闭环”，而不是随机种子。
     """
-    pack = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
+    pack = load_knowledge(ROOT / "knowledge" / "ningxia_cluster.yaml")
     from gcs.demo import POLICIES
     from gcs.llm import ModelGateway
 
@@ -167,7 +177,7 @@ def write_summary_json(rows: list[dict], path: Path) -> None:
         sub = [r for r in rows if r["group"] == code]
         if not sub:
             continue
-        item: dict = {"name": name, "n": len(sub)}
+        item: dict = {"name": name, "n": len(sub), "jobs": _actual_jobs(rows)}
         for f in ("sla_rate", "budget_rate", "green_ok_rate", "avg_wait_min",
                   "p95_wait_min", "cost_per_gpu_hour", "avg_green_share",
                   "green_window_ratio", "total_carbon_kg", "rubric_score", "rounds"):
@@ -176,7 +186,10 @@ def write_summary_json(rows: list[dict], path: Path) -> None:
             sd = statistics.pstdev(vals) if len(vals) > 1 else 0.0
             item[f] = [round(mean, 10), round(sd, 10)]
         out[code] = item
-    path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # newline="\n"：产物固定 LF，与 .gitattributes 的 eol=lf 一致，
+    # 避免同一份产物在 Windows / Linux 上字节不同（git diff 噪声）
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8", newline="\n")
 
 
 def bootstrap_ci(rows: list[dict], n_boot: int = 200, seed: int = 20261111) -> dict[str, dict]:
@@ -192,7 +205,7 @@ def bootstrap_ci(rows: list[dict], n_boot: int = 200, seed: int = 20261111) -> d
         if not sub:
             continue
         idx = list(range(len(sub)))
-        boot_means = {f: [] for f in
+        boot_means: dict[str, list[float]] = {f: [] for f in
                       ("sla_rate", "budget_rate", "avg_wait_min",
                        "cost_per_gpu_hour", "green_window_ratio",
                        "total_carbon_kg", "rubric_score", "rounds")}
@@ -205,7 +218,7 @@ def bootstrap_ci(rows: list[dict], n_boot: int = 200, seed: int = 20261111) -> d
             vals = boot_means[f]
             q = statistics.quantiles(vals, n=100)
             stats[f + "_lo95"] = q[4]
-            stats[f + "_hi95"] = q[95]
+            stats[f + "_hi95"] = q[94]
         out[code] = {"name": name, "n": len(sub), **stats}
     return out
 
@@ -228,7 +241,7 @@ def bootstrap_diff(rows: list[dict], n_boot: int = 200, seed: int = 20261111,
                 continue
             rng = random.Random(seed)
             idx_a, idx_b = list(range(len(sa))), list(range(len(sb)))
-            diffs = {f: [] for f in
+            diffs: dict[str, list[float]] = {f: [] for f in
                      ("sla_rate", "budget_rate", "avg_wait_min",
                       "cost_per_gpu_hour", "green_window_ratio",
                       "total_carbon_kg", "rubric_score", "rounds")}
@@ -312,13 +325,14 @@ def run_sensitivity(pack: KnowledgePack, jobs_n: int = JOBS,
     return {"jobs": jobs_n, "seeds": seeds, "threshold": th_rows, "weights": w_rows}
 
 
-DIFF_METRICS = [
-    ("cost_per_gpu_hour", "单位成本(元/GPU·h)", "{:.2f}"),
-    ("green_window_ratio", "绿电窗口作业占比", "{:.1%}"),
-    ("rubric_score", "rubric 得分", "{:.0f}"),
-    ("sla_rate", "SLA 达成率", "{:.1%}"),
-    ("avg_wait_min", "平均等待(min)", "{:.1f}"),
-]
+# 指标标签统一取自 gcs/metrics_meta.py，CI 表与 summary.md / HTML 看板同源
+DIFF_METRICS = [(field, LABEL[field], fmt) for field, fmt in (
+    ("cost_per_gpu_hour", "{:.2f}"),
+    ("green_window_ratio", "{:.1%}"),
+    ("rubric_score", "{:.0f}"),
+    ("sla_rate", "{:.1%}"),
+    ("avg_wait_min", "{:.1f}"),
+)]
 
 
 def diff_lines(diff: dict) -> list[str]:
@@ -330,8 +344,8 @@ def diff_lines(diff: dict) -> list[str]:
         "",
         "## 差异的 95% 置信区间（自助法，200 次重采样）",
         "",
-        "| 对比 | 指标 | 差值 | 95% 区间 | 判定 |",
-        "|---|---|---|---|---|",
+        "| 对比 | 指标 | 95% 区间 | 判定 |",
+        "|---|---|---|---|",
     ]
     flags = {}
     for key, label in picks:
@@ -400,7 +414,8 @@ def pareto_lines(pareto: dict) -> list[str]:
         "",
         "做法：约束、作业流、种子全部不变，只放大目标函数里的「排队」权重，观察等待与成本如何互换。",
         "",
-        "| 排队权重倍率 | 平均等待(min) | 单位成本(元/GPU·h) | 绿电窗口占比 | SLA 达成率 |",
+        "| 排队权重倍率 | " + " | ".join(LABEL[f] for f in (
+            "avg_wait_min", "cost_per_gpu_hour", "green_window_ratio", "sla_rate")) + " |",
         "|---|---|---|---|---|",
     ]
     for r in rows:
@@ -439,13 +454,13 @@ def pareto_lines(pareto: dict) -> list[str]:
         verdict = (f"排队权重放到 ×{knee['wait_scale']:g} 就能把平均等待从 "
                    f"{base['avg_wait_min']:.1f} 分钟压到 {knee['avg_wait_min']:.1f} 分钟，"
                    f"而单位成本只变化 {pct:+.1%}（{base['cost_per_gpu_hour']:.2f} → "
-                   f"{knee['cost_per_gpu_hour']:.2f} 元/GPU·h），绿电窗口占比变化 "
+                   f"{knee['cost_per_gpu_hour']:.2f} 元/GPU·h），绿电窗口作业占比变化 "
                    f"{dgreen:+.1%}。这是一个几乎免费的工作点，建议生产环境直接采用。")
     else:
         verdict = (f"排队权重放到 ×{knee['wait_scale']:g} 可把平均等待从 "
                    f"{base['avg_wait_min']:.1f} 分钟压到 {knee['avg_wait_min']:.1f} 分钟，"
                    f"代价是单位成本 {pct:+.1%}（{base['cost_per_gpu_hour']:.2f} → "
-                   f"{knee['cost_per_gpu_hour']:.2f} 元/GPU·h）、绿电窗口占比 {dgreen:+.1%}。"
+                   f"{knee['cost_per_gpu_hour']:.2f} 元/GPU·h）、绿电窗口作业占比 {dgreen:+.1%}。"
                    "这说明本方案的等待偏长是「用等待换成本与绿电」的显式取舍，"
                    "而不是排不出来；是否接受应由业务在前沿上自行选点。")
     lines += ["", f"帕累托非支配点：{front_desc}（在这条前沿上，等待更少、成本更低、绿电更高三者不可兼得）。"]
@@ -459,12 +474,25 @@ def pareto_lines(pareto: dict) -> list[str]:
                       f"{base['avg_wait_min']:.1f} → {pick['avg_wait_min']:.1f} 分钟，"
                       f"单位成本 {base['cost_per_gpu_hour']:.2f} → "
                       f"{pick['cost_per_gpu_hour']:.2f} 元/GPU·h 基本持平"
-                      f"（绿电窗口占比 {pick['green_window_ratio']:.1%}，"
+                      f"（绿电窗口作业占比 {pick['green_window_ratio']:.1%}，"
                       f"较当前 {base['green_window_ratio']:.1%} 略低）。"]
     lines += ["", verdict,
-              "", f"口径：同一知识包 {KB_VERSION}、同一批种子，SLA 与预算约束不变，"
+              "", f"口径：同一知识包 {kb_version()}、同一批种子，SLA 与预算约束不变，"
               "因此表中每一行都是可行解，差别只在偏好。"]
     return lines
+
+
+def _actual_jobs(rows: list[dict]) -> int:
+    """本次评测实际使用的作业数：从产物 rows 的首条记录推导，缺省回退模块常量 JOBS。
+
+    产物里声明的作业数必须与本次 --jobs 实际取值一致，不得写死 80（F2）。
+    """
+    if rows:
+        try:
+            return int(rows[0]["jobs"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return JOBS
 
 
 def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None = None,
@@ -480,12 +508,14 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
     lines = [
         "# 对照实验结果摘要",
         "",
-        f"作业规模 {JOBS} 个/次，固定种子 {len(SEEDS_FIXED)} 次（"
-        f"{', '.join(map(str, SEEDS_FIXED))}），同一模拟器数据、同一知识包版本 {KB_VERSION}、"
+        f"作业规模 {_actual_jobs(rows)} 个/次，固定种子 {len(SEEDS_FIXED)} 次（"
+        f"{', '.join(map(str, SEEDS_FIXED))}），同一模拟器数据、同一知识包版本 {kb_version()}、"
         "同一评测脚本。",
         "",
-        "| 组别 | 配置 | SLA 达成率 | 预算达标率 | 绿电达标率 | 单位成本(元/GPU·h) | "
-        "绿电窗口作业占比 | 平均等待(min) | 碳排(kg) | 返工轮次 | rubric |",
+        "| 组别 | 配置 | " + " | ".join(LABEL[f] for f in (
+            "sla_rate", "budget_rate", "green_ok_rate", "cost_per_gpu_hour",
+            "green_window_ratio", "avg_wait_min", "total_carbon_kg",
+            "rounds", "rubric_score")) + " |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for code, _n, _k, _d in GROUPS:
@@ -506,13 +536,13 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
             "",
             "## 相对 G-A（FCFS 规则调度）的变化",
             "",
-            f"- SLA 达成率：{base['sla_rate_mean']:.1%} → {full['sla_rate_mean']:.1%}",
-            f"- 预算达标率：{base['budget_rate_mean']:.1%} → {full['budget_rate_mean']:.1%}",
-            f"- 单位成本：{base['cost_per_gpu_hour_mean']:.2f} → "
+            f"- {TERM['sla_rate']}：{base['sla_rate_mean']:.1%} → {full['sla_rate_mean']:.1%}",
+            f"- {TERM['budget_rate']}：{base['budget_rate_mean']:.1%} → {full['budget_rate_mean']:.1%}",
+            f"- {TERM['cost_per_gpu_hour']}：{base['cost_per_gpu_hour_mean']:.2f} → "
             f"{full['cost_per_gpu_hour_mean']:.2f} 元/GPU·h",
-            f"- 绿电窗口作业占比：{base['green_window_ratio_mean']:.1%} → "
+            f"- {TERM['green_window_ratio']}：{base['green_window_ratio_mean']:.1%} → "
             f"{full['green_window_ratio_mean']:.1%}",
-            f"- 平均等待：{base['avg_wait_min_mean']:.0f} → {full['avg_wait_min_mean']:.0f} 分钟"
+            f"- {TERM['avg_wait_min']}：{base['avg_wait_min_mean']:.0f} → {full['avg_wait_min_mean']:.0f} 分钟"
             "（用可控的排队换成本与绿电）",
             "",
             "排队上升不是缺陷，而是显式的取舍：文末「排队—成本帕累托前沿」用反事实扫描给出了"
@@ -532,8 +562,9 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
             "",
             "### 1. 返工阈值",
             "",
-            "| 阈值 | 实际返工轮次 | 终评 rubric | SLA 达成率 | 单位成本(元/GPU·h) "
-            "| 绿电窗口作业占比 | 累计 token |",
+            "| 阈值 | 实际返工轮次 | 终评 rubric | " + " | ".join(
+                LABEL[f] for f in ("sla_rate", "cost_per_gpu_hour",
+                                   "green_window_ratio")) + " | 累计 token |",
             "|---|---|---|---|---|---|---|",
         ]
         for r in th:
@@ -560,8 +591,9 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
             "",
             "### 2. 绿电权重",
             "",
-            "| 绿电+碳排权重占比 | 倍率 | 实测占比 | 单位成本(元/GPU·h) | 绿电窗口作业占比 "
-            "| 平均绿电占比 | 平均等待(min) | SLA 达成率 |",
+            "| 绿电+碳排权重占比 | 倍率 | 实测占比 | " + " | ".join(
+                LABEL[f] for f in ("cost_per_gpu_hour", "green_window_ratio",
+                                   "avg_green_share", "avg_wait_min", "sla_rate")) + " |",
             "|---|---|---|---|---|---|---|---|",
         ]
         for r in wt:
@@ -587,7 +619,7 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
                        "说明在当前作业规模下，绿电权重主要改变排序的边际，"
                        "成本差异落在重排本身的噪声范围内。")
         else:
-            verdict = (f"绿电窗口占比在 {min(green_vals):.1%}–{max(green_vals):.1%} 之间、"
+            verdict = (f"绿电窗口作业占比在 {min(green_vals):.1%}–{max(green_vals):.1%} 之间、"
                        f"单位成本在 {min(cost_vals):.2f}–{max(cost_vals):.2f} 之间小幅变化，"
                        "没有出现方向性翻转。也就是说，绿电权重在本规模下是弱敏感参数："
                        "它不改变方案的可行性判断，只在同等可行时调整优先次序。")
@@ -613,8 +645,9 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
                     "说明成本优势对权重取值敏感，需在答辩中限定适用范围。")
         lines += [
             "",
-            "注：绿电权重置零后绿电窗口作业占比仍不为零，因为窗口内起跑同时受截止时间与"
-            "集群可用性约束，权重只影响「同等可行时优先谁」，不改变可行性本身。",
+            "注：绿电权重置零后绿电窗口作业占比仍不为零，因为该指标统计的是整作业执行期"
+            "平均绿电占比 ≥75% 的作业；绿电权重只影响「同等可行时优先谁」，不改变作业"
+            "执行期覆盖的绿电时段与可行性本身。",
             "",
             "> 说明：G-D 与 G-E2 的成本差来自目标函数中绿电权重的显式代价，并非缺陷；"
             "G-C 为通用 Agent 的行为模拟，不是真实 DeerFlow 运行结果，在答辩中按“模拟对照”表述。",
@@ -623,51 +656,52 @@ def write_summary(rows: list[dict], stats: dict, path: Path, sens: dict | None =
         lines += diff_lines(diff)
     if pareto:
         lines += pareto_lines(pareto)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def write_html(rows: list[dict], stats: dict, path: Path) -> None:
     """生成单文件评测看板（无外部依赖），供答辩现场直接展示六组对比。"""
-    metrics = [
-        ("sla_rate", "SLA 达成率", True, 100),
-        ("budget_rate", "预算达标率", True, 100),
-        ("avg_green_share", "绿电达标率", True, 100),
-        ("cost_per_gpu_hour", "单位算力成本（元/GPU·h）", False, 5),
-        ("green_window_ratio", "绿电窗口作业占比", True, 100),
-        ("avg_wait_min", "平均排队（min）", False, 999),
-        ("total_carbon_kg", "总碳排（kg）", False, 999),
-        ("rubric_score", "rubric 得分", True, 100),
-    ]
-    body = []
+    metrics = [(f, LABEL[f], pct, mx) for f, pct, mx in (
+        ("sla_rate", True, 100), ("budget_rate", True, 100),
+        ("avg_green_share", True, 100), ("cost_per_gpu_hour", False, 5),
+        ("green_window_ratio", True, 100), ("avg_wait_min", False, 999),
+        ("total_carbon_kg", False, 999), ("rubric_score", True, 100),
+    )]
+    body_rows: list[str] = []
     for code, _n, _k, _d in GROUPS:
         s = stats.get(code)
         if not s:
             continue
-        row = [f"<tr><td class='mono'><b>{code}</b></td><td>{s['name']}</td>"]
+        row = [f"<tr><td class='mono'><b>{escape(code)}</b></td><td>{escape(s['name'])}</td>"]
         for key, _label, _is_pct, _max in metrics:
             mean = s[f"{key}_mean"]
             ci = s[f"{key}_ci95"]
-            row.append(f"<td>{mean:.2f} ± {ci:.2f}</td>")
+            cell = f"{mean:.2f} ± {ci:.2f}"
+            row.append(f"<td>{escape(cell)}</td>")
         row.append("</tr>")
-        body.append("".join(row))
-    body = "".join(body)
+        body_rows.append("".join(row))
+    body = "".join(body_rows)
 
     base = stats.get("G-A", {})
     full = stats.get("G-D", {})
     deltas = []
     if base:
         for key, _label, _is_pct, _max in metrics:
-            if key in base and key in full:
+            if f"{key}_mean" in base and f"{key}_mean" in full:
+                bv, fv = base[key + "_mean"], full[key + "_mean"]
+                d1 = f"{bv:.2f} → {fv:.2f}"
+                # 基线为 0 时相对变化无定义（除零），显示 n/a 而不是崩掉
+                d2 = f"{(fv / bv - 1) * 100:+.1f}%" if bv else "n/a（基线为 0）"
                 deltas.append(
-                    f"<tr><td class='mono'>{key}</td>"
-                    f"<td>{base[key+'_mean']:.2f} → {full[key+'_mean']:.2f}</td>"
-                    f"<td>{(full[key+'_mean']/base[key+'_mean']-1)*100:+.1f}%</td></tr>")
+                    f"<tr><td class='mono'>{escape(key)}</td>"
+                    f"<td>{escape(d1)}</td><td>{escape(d2)}</td></tr>")
     delta_body = "".join(deltas)
 
     path.write_text(
         "<!DOCTYPE html><html lang='zh-CN'><head><meta charset='utf-8'>"
         "<title>对照实验评测看板</title><style>"
-        "body{font-family:SimSun,'Noto Sans CJK SC',sans-serif;color:#222;padding:24px}"
+        "body{font-family:system-ui,'Noto Sans CJK SC','Microsoft YaHei',SimSun,sans-serif;"
+        "color:#222;padding:24px}"
         "h1{font-size:20px;margin-bottom:4px} .note{color:#666;font-size:13px}"
         "table{width:100%;border-collapse:collapse;font-size:13px}"
         "th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}"
@@ -675,11 +709,11 @@ def write_html(rows: list[dict], stats: dict, path: Path) -> None:
         ".good{color:#1F8A70}.bad{color:#C0392B}"
         "</style></head><body>"
         "<h1>2026 第五届「未来杯」创新大赛 · 赛道一评测看板</h1>"
-        f"<p class='note'>作业 {JOBS} 个/次，固定种子 {len(SEEDS_FIXED)} 次 "
-        f"（{', '.join(map(str, SEEDS_FIXED))}），同一知识包 {KB_VERSION}。"
+        f"<p class='note'>作业 {_actual_jobs(rows)} 个/次，固定种子 {len(SEEDS_FIXED)} 次 "
+        f"（{', '.join(map(str, SEEDS_FIXED))}），同一知识包 {kb_version()}。"
         "单位成本参考线 6.0 元/GPU·h。</p>"
         "<table><thead><tr><th>组</th><th>配置</th>"
-        + "".join(f"<th>{label}</th>" for _k, label, _p, _m in metrics)
+        + "".join(f"<th>{escape(label)}</th>" for _k, label, _p, _m in metrics)
         + "</tr></thead><tbody>" + body + "</tbody></table>"
         "<h2>相对 G-A 的变化</h2><table><thead><tr><th>指标</th><th>G-A → G-D</th><th>相对变化</th></tr></thead>"
         + f"<tbody>{delta_body}</tbody></table>"
@@ -687,46 +721,96 @@ def write_html(rows: list[dict], stats: dict, path: Path) -> None:
         "</body></html>", encoding="utf-8")
 
 
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--outdir", default=str(ROOT / "evaluation"))
-    p.add_argument("--jobs", type=int, default=JOBS)
+def _jobs_range(raw: str) -> int:
+    """--jobs 取值范围校验：1-300，越界按 argparse 约定退出码 2 并给出中文提示。
+
+    与 gcs/demo.py::positive_jobs 口径完全一致；evaluation 脚本独立运行，
+    故取局部常量 MIN_JOBS/MAX_JOBS，不 import gcs.demo（F1）。
+    """
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"--jobs 必须是整数，收到 {raw!r}") from None
+    if n < MIN_JOBS:
+        raise argparse.ArgumentTypeError(
+            f"--jobs 必须 >= {MIN_JOBS}（收到 {n}）；0 或负数会产出全零的无效指标")
+    if n > MAX_JOBS:
+        raise argparse.ArgumentTypeError(
+            f"--jobs 必须 <= {MAX_JOBS}（收到 {n}）；评测场景不需要更大规模")
+    return n
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI 入口：0 成功；2 参数/校验/写盘错误；绝不向用户泄漏裸 traceback（F1/F4/F7/F8）。"""
+    # Windows 控制台默认 cp1252/GBK，中文与货币符号会抛 UnicodeEncodeError。
+    # 必须同时覆盖 stderr：argparse 的 usage/error 走 stderr，若只配 stdout，
+    # 在 cp1252 控制台上中文会被转成 \uXXXX 转义（2026-11-15 GitHub Windows
+    # runner 实测：test_eval 断言「--jobs 必须 >= 1」因此失败）。
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            try:
+                _reconfigure(encoding="utf-8", errors="replace")
+            except Exception:  # best-effort：非 TTY / 已重定向流不支持 reconfigure
+                pass
+    p = argparse.ArgumentParser(description="六组对照实验评测入口")
+    p.add_argument("--outdir", default=str(ROOT / "evaluation"),
+                   help="产物输出目录（默认仓库 evaluation/）")
+    p.add_argument("--jobs", type=_jobs_range, default=JOBS,
+                   help=f"对照组作业数，取值 {MIN_JOBS}-{MAX_JOBS}（默认 {JOBS}）")
     p.add_argument("--workers", type=int, default=0,
                    help="并行度（0=自动，1=串行）；--serial 等价于 --workers 1")
     p.add_argument("--serial", action="store_true",
                    help="强制串行执行，用于与并行结果做逐行一致性对照")
-    args = p.parse_args()
+    args = p.parse_args(argv)
     workers = 1 if args.serial else args.workers
 
+    # F8：知识包加载走 gcs.knowledge.load_knowledge，非法知识包 → 中文提示 + rc=2，
+    # 绝不把裸 traceback 或内部路径暴露给使用者。
+    try:
+        pack = load_knowledge(ROOT / "knowledge" / "ningxia_cluster.yaml")
+    except KnowledgeError as exc:
+        print(f"[ERROR] 知识包加载失败：{exc}", file=sys.stderr)
+        print(f"[ERROR] {KNOWLEDGE_HINT}", file=sys.stderr)
+        return 2
+
     outdir = Path(args.outdir)
-    pack = KnowledgePack.load(ROOT / "knowledge" / "ningxia_cluster.yaml")
+    try:
+        rows = run_all(outdir, jobs_n=args.jobs, workers=workers)  # 含目录创建（F4：--outdir 不可写/非目录）
+        stats = aggregate(rows)
 
-    rows = run_all(outdir, jobs_n=args.jobs, workers=workers)
-    write_csv(rows, outdir / "results.csv")
+        print("\n参数扫描：返工阈值 / 绿电权重 ...")
+        sens = run_sensitivity(pack, jobs_n=args.jobs, workers=workers)
+        with (outdir / "sensitivity.json").open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(sens, f, ensure_ascii=False, indent=2)
 
-    stats = aggregate(rows)
+        print("帕累托扫描：排队权重 0.5~16 倍 ...")
+        pareto = run_pareto(pack, jobs_n=args.jobs, workers=workers)
+        with (outdir / "pareto.json").open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(pareto, f, ensure_ascii=False, indent=2)
 
-    print("\n参数扫描：返工阈值 / 绿电权重 ...")
-    sens = run_sensitivity(pack, jobs_n=args.jobs, workers=workers)
-    with (outdir / "sensitivity.json").open("w", encoding="utf-8") as f:
-        json.dump(sens, f, ensure_ascii=False, indent=2)
+        write_html(rows, stats, outdir / "eval_report.html")
 
-    print("帕累托扫描：排队权重 0.5~16 倍 ...")
-    pareto = run_pareto(pack, jobs_n=args.jobs, workers=workers)
-    with (outdir / "pareto.json").open("w", encoding="utf-8") as f:
-        json.dump(pareto, f, ensure_ascii=False, indent=2)
+        ci = bootstrap_ci(rows)
+        with (outdir / "ci_bootstrap.json").open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(ci, f, ensure_ascii=False, indent=2)
 
-    write_html(rows, stats, outdir / "eval_report.html")
+        diff = bootstrap_diff(rows)
+        with (outdir / "diff_ci.json").open("w", encoding="utf-8", newline="\n") as f:
+            json.dump(diff, f, ensure_ascii=False, indent=2)
 
-    ci = bootstrap_ci(rows)
-    with (outdir / "ci_bootstrap.json").open("w", encoding="utf-8") as f:
-        json.dump(ci, f, ensure_ascii=False, indent=2)
-
-    diff = bootstrap_diff(rows)
-    with (outdir / "diff_ci.json").open("w", encoding="utf-8") as f:
-        json.dump(diff, f, ensure_ascii=False, indent=2)
-
-    write_summary(rows, stats, outdir / "summary.md", sens=sens, diff=diff, pareto=pareto)
-    write_summary_json(rows, outdir / "summary.json")
+        write_summary(rows, stats, outdir / "summary.md", sens=sens, diff=diff, pareto=pareto)
+        write_summary_json(rows, outdir / "summary.json")
+        # CSV 最后落盘：所有分析与统计都成功后才写，避免中途失败留下
+        # 「行数正常但数值全为 0」的半成品产物（那类文件能通过 CI 的行数校验）。
+        write_csv(rows, outdir / "results.csv")
+    except OSError as exc:
+        print(f"[ERROR] 产物目录不可写或非目录（--outdir {args.outdir}）：{exc}", file=sys.stderr)
+        return 2
 
     print("\n评测完成，结果落到", outdir)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

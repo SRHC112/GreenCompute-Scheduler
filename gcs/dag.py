@@ -80,26 +80,6 @@ class Dag:
             groups.setdefault(d, []).append(nid)
         return [groups[k] for k in sorted(groups)]
 
-    def downstream(self, node_id: str) -> set[str]:
-        """节点级拓扑工具：返回（间接）依赖该节点的前向节点集合，不含本身。
-
-        P1-2.2 / FR-12 定性：只沿主链传播，标记为 loop 的返工节点不计入结果，
-        与 forward_deps() / levels() 的「返工边不参与拓扑层级」约定一致。
-
-        注意：本方法是**节点级**拓扑工具，不参与编排器的返工判定。FR-12
-        「缺陷仅退责任子树」由 orchestrator.run 的**作业级**
-        ``only=jobs_to_rework`` + ``plan.update(fresh)`` 实现，二者粒度不同；
-        用本方法的返回值替换返工作业集合会演变成整链重跑，违反 FR-12。
-        """
-        out, frontier = set(), [node_id]
-        while frontier:
-            cur = frontier.pop()
-            for nid, node in self.nodes.items():
-                if cur in node.deps and not node.loop and nid not in out:
-                    out.add(nid)
-                    frontier.append(nid)
-        return out
-
     def to_dict(self) -> dict:
         """序列化为前端可直接消费的字典：nodes + levels（并行层级）。"""
         return {

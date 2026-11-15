@@ -1,0 +1,17 @@
+# CI 专用依赖（**不是**运行时依赖）
+#
+# 与 requirements.txt 的分工：
+# - requirements.txt     运行时/开发唯一第三方依赖（PyYAML），「一条命令跑起来」靠它；
+# - 本文件              只在 GitHub Actions 里用的质量工具（覆盖率 / 类型检查），版本固定。
+#
+# 写成独立文件的原因：setup-python 的 `cache: pip` 以依赖文件哈希为缓存键，
+# 若在 step 内现装 mypy，5 个矩阵组合各装一次，慢网下容易顶到 job 的 timeout-minutes。
+# 固定版本的理由：上游发版不应让 CI 突然变红。
+#
+# 注意：coverage 7.17.x 要求 Python >= 3.11（2026-11-15 GitHub runner 实测：
+# 3.10 job 上 pip 报 Requires-Python >=3.11）。矩阵最低 3.10，故 coverage
+# 用环境标记给 3.10 回退到 7.10.x（最后一个支持 3.10 的系列）。
+coverage==7.17.3; python_version >= "3.11"
+coverage==7.10.4; python_version < "3.11"
+mypy==1.18.2
+types-PyYAML>=6.0.12,<7.0

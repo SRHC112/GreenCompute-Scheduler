@@ -64,7 +64,7 @@ python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 ```
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
-→ 跑 109 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 跑 147 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
 → 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
 
 **唯一的一次交互确认**
@@ -84,7 +84,7 @@ python install.py --dir D:\dev\GreenCompute-Scheduler   # 自定义目标目录
 > `.env` 由运行入口在启动时加载为环境变量——项目本身只读 `os.getenv`，不会自动读 `.env`，
 > 因此**不需要改动任何现有源码**。已存在的 `.venv` / `.env` / `run.bat` / `run.sh` 一律不覆盖，脚本可重复运行。
 > 自动化场景：`python install.py --no-llm`（离线）或 `--llm`（配合 `GCS_LLM_*` 环境变量）可完全免交互；
-> `--check` 只做只读预检。
+> `--check` 只做只读预检：除 Python 版本与项目结构外，还校验唯一第三方运行时依赖 PyYAML（`>=6.0,<7.0`）；缺失、不可导入或版本越界均返回非零并给出 `pip install -r requirements.txt` 提示，不联网、不安装、不写任何文件。
 
 **安装完成后的快捷运行**（无需手动激活虚拟环境）
 
@@ -144,7 +144,7 @@ python -c "import yaml; print('PyYAML', yaml.__version__)"
 python -m unittest discover -s tests -v
 ```
 
-预期输出：`Ran 109 tests ... OK`，实测耗时约 3 秒（Python 3.13 / Windows）。
+预期输出：`Ran 147 tests ... OK`，实测耗时约 6 秒（Python 3.13 / Windows）。
 
 ### 3.2 一键完整编排（核心演示）
 
@@ -167,7 +167,7 @@ python -m gcs.demo --jobs 60 --seed 20261111
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--jobs` | `40` | 作业数量 |
+| `--jobs` | `40` | 作业数量，必须 `>= 1`；`0` / 负数会由 argparse 以中文提示拒绝（退出码 2）。合法取值行为不变 |
 | `--seed` | `20261111` | 随机种子；相同种子 + 相同参数必然得到相同指标 |
 | `--policy` | `full` | `full` / `fcfs` / `sjf` / `generic` / `no_reflect` / `no_green` |
 | `--knowledge` | `knowledge/ningxia_cluster.yaml` | 领域知识包路径 |
@@ -184,6 +184,15 @@ python app/server.py --open
 参数：`--host`（默认 `127.0.0.1`）、`--port`（默认 `8000`）、`--open`（启动后自动打开浏览器）。
 按 `Ctrl+C` 停止服务。
 
+**默认安全边界**（无需额外配置即可生效）：
+
+- 响应统一带 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
+  与 `Content-Security-Policy`（默认拒绝一切外部加载，只放行内联样式/脚本与同源 `fetch`）；
+- `Server` 头只回 `GreenCompute/1.0.0`，不回解释器精确版本；
+- `Host` 头走白名单：回环名、`--host` 绑定地址、本机主机名/FQDN 与其解析出的本机 IP；
+  需要额外域名时用 `GCS_ALLOWED_HOSTS=域名1,域名2` 追加。缺失 `Host` 回 `400`，不在白名单回 `403`（阻断 DNS rebinding）；
+- `/favicon.ico` 显式回 `204`，控制台不再出现无意义的 404。
+
 ### 3.4 对照实验
 
 ```bash
@@ -192,14 +201,24 @@ python evaluation/run_eval.py
 
 按 **6 组配置 × 3 个随机种子、每组 80 个作业**运行，产出：
 
-- `evaluation/results.csv` — 逐次原始结果（18 行，可追溯到每一次运行）
+- `evaluation/results.csv` — 逐次原始结果（18 行，可追溯到每一次运行；**UTF-8 带 BOM**，见下）
 - `evaluation/summary.md` / `summary.json` — 均值 ± 标准差与相对提升
 - `evaluation/eval_report.html` — 可直接截图的对比看板
 
 > `runs/` 已被 `.gitignore` 忽略，运行产物不入库；`evaluation/` 下的评测结果作为作品证据随仓库提交。
 > ⚠️ 重跑该脚本会**覆盖**上述已提交的评测文件，提交前请确认是否要保留原数据。
+>
+> **`results.csv` 的编码**：为方便 Excel 直接双击打开，文件以 `utf-8-sig`（带 BOM）写出；
+> 脚本读取时请用 `encoding="utf-8-sig"`，否则首列字段名会变成 `\ufeffgroup`。示例：
+>
+> ```python
+> import csv
+> with open("evaluation/results.csv", encoding="utf-8-sig", newline="") as f:
+>     rows = list(csv.DictReader(f))
+> print(rows[0]["group"])  # 首列读取正常，无 BOM 残影
+> ```
 > 六组对照与两份反事实扫描中的独立编排计算默认并行（`ThreadPoolExecutor`，结果按原顺序汇总），
-> 同种子同参数结果与串行**逐行一致**；`python evaluation/run_eval.py --serial` 可做对照验证。
+> 同种子同参数结果与串行**实测一致**；`python evaluation/run_eval.py --serial` 可做对照验证。
 > `sensitivity.json` / `pareto.json` 属作品证据已入库；
 > `trace_fit.json` 与 `evaluation/traces/` 属一次性调参中间产物，不入仓。
 
@@ -222,7 +241,7 @@ python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
 ```
 
 - **浏览器**：操作台页首「访问凭据」输入框粘贴（只存 `sessionStorage`，不进 URL / 日志）。
-- **命令行**：`curl -H "Authorization: Bearer <凭据>" -X POST ...`。
+- **命令行**：`curl -H "Authorization: Bearer <凭据>" -H "Content-Type: application/json" -X POST ...`。
 - **三态**：`off`（仅故障回退）/ `loopback`（默认）/ `required`（一律要求凭据）。
   `required` 下缺凭据或凭据超过 90 天会**拒绝启动**（fail-closed）；`loopback` 仅告警。
 - **独立命名空间** `GCS_AUTH_*`，不复用 `GCS_LLM_*`：模型层缺 Key 是离线降级，
@@ -246,7 +265,7 @@ python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
 
 ## 四、验证清单（如何确认跑对了）
 
-1. `python -m unittest discover -s tests -v` → **109 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
+1. `python -m unittest discover -s tests -v` → **147 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
 4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行；
@@ -301,6 +320,10 @@ python -m gcs.demo --jobs 60
 
 支持 DeepSeek、智谱 GLM、阿里 Qwen、火山 Doubao、百度千帆、MiniMax 等 OpenAI 兼容接口。
 
+> **传输要求**：`GCS_LLM_BASE_URL` 必须是 `https://`；仅 `http://127.0.0.1` / `http://localhost`
+> （本地代理、自建推理服务）例外。非 https 的公网地址会被判定为不安全，网关**直接降级为离线 mock**，
+> 不会在该地址上发送 API Key（`gateway.mode` 仍为 `offline-mock`，指标数值不受影响）。
+
 **模型路由与自定义适配器**（`gcs/llm.py`）：
 
 - 两级路由：`chat(..., tier="primary")`（默认，归因叙述 / 语义 Judge）与 `tier="light"`（轻量任务）；
@@ -345,24 +368,30 @@ GreenCompute-Scheduler/
 │   ├── server.py                  零依赖可视化操作台（仅标准库）
 │   ├── auth.py                    静态 Token 分级鉴权（仅标准库、fail-closed）
 │   └── auth_tool.py               凭据生成 / 轮换 / 状态 CLI
-├── tests/                         单元测试合计 109 个
+├── tests/                         单元测试合计 147 个（12 个文件）
 │   ├── test_smoke.py              12 个冒烟测试（知识包 / 确定性 / 编排收敛 / 指标有限性）
 │   ├── test_verifier.py           12 个五层验证器用例
-│   ├── test_reflect.py            11 个自省 rubric / 归因 / 返工用例
-│   ├── test_report.py             11 个看板与报告产物用例
+│   ├── test_reflect.py            12 个自省 rubric / 归因 / 返工用例
+│   ├── test_report.py             12 个看板与报告产物用例
 │   ├── test_pareto.py             5 个 Pareto 权重缩放用例
 │   ├── test_llm.py                23 个模型网关用例（离线降级 / 预算 / 路由 / 适配器）
-│   ├── test_auth.py               20 个鉴权核心用例（三态 / fail-closed / 过期 / 轮换 / 凭据工具）
-│   └── test_server.py             15 个操作台异常边界与鉴权集成用例
+│   ├── test_auth.py               22 个鉴权核心用例（三态 / fail-closed / 过期 / 轮换 / 凭据工具）
+│   ├── test_server.py             19 个操作台异常边界与鉴权集成用例
+│   ├── test_eval.py               7 个评测聚合 / 自助法 / run_all 链路用例
+│   ├── test_eval_outputs.py       17 个 write_* 输出层用例（正常 / 空 / 边界 / 异常）
+│   ├── test_trace_fit.py          3 个阈值口径与硬断言用例
+│   └── test_install.py            3 个安装脚本与 .env 合并写入用例
 ├── docs/
 │   ├── 架构说明.md                 架构与关键设计说明
 │   ├── DEPLOY.md                  Git 部署/推送流程与排障
 │   ├── 参数出处.md                 每个关键参数的取值、来源与可信度表
 │   ├── 性能与并发.md              实测吞吐、并发加速比与可复现性结论
-│   └── THIRD_PARTY.md             第三方依赖与许可声明
+│   ├── THIRD_PARTY.md             第三方依赖与许可声明
+│   └── 部署边界与排查手册.md        半开连接 / off 模式 / 安装脚本三类部署问题的现象、成因与处置
 ├── runs/                          运行产物（.gitkeep 占位，内容不入仓）
 ├── .gitignore
-├── requirements.txt
+├── requirements.txt                # 运行时唯一第三方依赖（PyYAML）
+├── requirements-ci.txt             # 仅 CI 使用的质量工具（coverage / mypy / types-PyYAML，版本固定）
 └── LICENSE                       Apache-2.0
 ```
 
@@ -375,10 +404,14 @@ GreenCompute-Scheduler/
 | `ModuleNotFoundError: No module named 'yaml'` | 未装依赖，或装到了别的解释器 | `python -m pip install -r requirements.txt`，并用同一个 `python` 运行 |
 | `python` 不是内部或外部命令 | Python 未加入 PATH | Windows 用 `py -3`；或重装时勾选 "Add to PATH" |
 | Windows 控制台中文/货币符号乱码 | 终端编码非 UTF-8 | 程序已强制 UTF-8 输出；仍乱码时执行 `chcp 65001` |
-| `OSError: [WinError 10048]` 端口被占用 | 8000 已被其他程序占用 | `python app/server.py --port 8080` |
+| 启动时报「端口 8000 无法监听」 | 8000 已被其他程序占用（服务会明确报错并退出码 2，不再静默抢占） | `python app/server.py --port 8080` |
+| 双击 `install.bat` 出现乱码或「不是内部或外部命令」 | 批处理被改成了 LF 或含非 ASCII 字节，cmd 解析错行 | `install.bat` 必须保持 CRLF + 纯 ASCII（仓库根 `.gitattributes` 已强制）；中文提示由 `install.py` 输出 |
 | 找不到 `console.html` | 查看了旧的运行目录 | 以终端打印的「产物」路径为准，或直接打开 `runs/latest.html` |
 | 模型调用报错 / 超时 | 网络或密钥问题 | 不配置也能跑，系统自动降级，指标数值不变 |
 | `git push` 失败、提示代理连不上 | 本机 Git 代理配置失效 | 见 [docs/DEPLOY.md](docs/DEPLOY.md) 第六节 |
+| 页面打不开、接口大量 `503`，几十秒后自己恢复 | 半开/慢速连接占满 64 个并发槽，等 `timeout=60` 释放 | 见 [docs/部署边界与排查手册.md](docs/部署边界与排查手册.md) 第四节 |
+| 没带 Token 也能 `POST /api/run` | 处于 `GCS_AUTH_MODE=off`，且绑定地址不是回环 | 见 [docs/部署边界与排查手册.md](docs/部署边界与排查手册.md) 第五节 |
+| 换机器重装后行为/指标与之前不一致 | `install.py` clone 取的是默认分支 HEAD，两次装的可能不是同一版 | 见 [docs/部署边界与排查手册.md](docs/部署边界与排查手册.md) 第六节 |
 
 ---
 
@@ -426,10 +459,11 @@ G-C 为行为模拟对照，答辩时须如实标注，而非真实第三方框�
 | [docs/架构说明.md](docs/架构说明.md) | 架构与关键设计说明 |
 | [docs/参数出处.md](docs/参数出处.md) | 每个关键参数的取值、来源与可信度表 |
 | [docs/性能与并发.md](docs/性能与并发.md) | 实测吞吐、并发加速比与可复现性结论 |
+| [docs/部署边界与排查手册.md](docs/部署边界与排查手册.md) | 半开连接导致短时 503、`off` 模式局域网匿名可写、安装脚本拉取 HEAD/不校验依赖哈希：现象、成因、排查步骤、处置方案与验证方法 |
 | [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | 第三方依赖与许可声明 |
 | [docs/竞赛符合性对照_2026未来杯.md](docs/竞赛符合性对照_2026未来杯.md) | 官方要求逐条对照：硬门槛、初赛必交件、决赛补充与缺口优先级（GCS-CONF-CONTEST-2026-001） |
 | [docs/项目白皮书_初赛.md](docs/项目白皮书_初赛.md) | 赛事「项目白皮书」5 小节：概述 / 解决方案 / 应用成效 / 商业模式 / 团队（GCS-WP-2026-001） |
-| [docs/演示视频脚本_初赛.md](docs/演示视频脚本_初赛.md) | 3 分 40 秒演示视频分镜、旁白逐字稿、录屏命令清单与口径红线 |
+| [docs/演示视频脚本_初赛.md](docs/演示视频脚本_初赛.md) | 约 4 分钟演示视频分镜、旁白逐字稿、录屏命令清单与口径红线 |
 | [docs/SRS_需求规格说明书.md](docs/SRS_需求规格说明书.md) | 自建需求规格说明书 |
 | [docs/RTM_需求追踪矩阵.md](docs/RTM_需求追踪矩阵.md) | 需求追踪矩阵 |
 | [docs/测试计划.md](docs/测试计划.md) / [docs/测试用例.md](docs/测试用例.md) / [docs/测试报告.md](docs/测试报告.md) | 测试三件套 |

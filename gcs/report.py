@@ -2,19 +2,30 @@
 
 产出的 console.html 是零依赖单文件（无 CDN、无外链），
 既能在参赛演示里当“操作台”展示，也能直接截图进方案书。
+
+HTML 输出纪律（统一转义，避免遗漏与重复）：
+- `_h()` 是 Python 侧唯一的 HTML 文本/属性转义入口；所有动态值插入模板前
+  经过它**一次且仅一次**，包含数值（先 format 再转义）。
+- `gcs/webassets.py::DAG_JS` 的 `esc()` 是前端 innerHTML 的唯一入口；
+  已使用 textContent / DOM property 的通道不再转义。
+- `_js_json()` 处理内嵌 <script> 的 JSON，防止 `</script>` 提前闭合脚本块。
+- 指标名称统一取自 `gcs/metrics_meta.py`，不与评测产物各写一份。
 """
 
 from __future__ import annotations
 
+from html import escape
 import json
 from pathlib import Path
 
+from .metrics_meta import DEFINITION, NOTE, TERM
 from .orchestrator import Artifact
+from .webassets import DAG_JS
 
 NAVY = "#1F3352"
 CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:"Microsoft YaHei","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;
+body{font-family:system-ui,"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
      background:#F2F4F8;color:#232A33;-webkit-font-smoothing:antialiased}
 .wrap{max-width:1500px;margin:0 auto;padding:0 26px 40px}
 header{background:#1F3352;color:#fff;padding:22px 26px 20px;border-bottom:5px solid #E08A3C}
@@ -66,54 +77,30 @@ td{padding:6px 8px;border-bottom:1px solid #EDF0F5;color:#3A4553}
 tr:nth-child(even) td{background:#F8FAFD}
 .bad{color:#C0392B;font-weight:600}.good{color:#1F8A70}
 .scroll{max-height:300px;overflow:auto}
+.mdefs{margin-top:16px;font-size:11px;color:#5A6779}
+.mdefs summary{cursor:pointer;color:#1F3352;font-weight:600}
+.mdefs ul{margin:8px 0 0 18px;line-height:1.6}
 footer{margin-top:18px;font-size:11px;color:#98A3B3;display:flex;justify-content:space-between}
 """
 
 
+def _h(value: object) -> str:
+    """HTML 文本/属性插入的唯一转义入口（quote=True 同时覆盖属性值）。
+
+    任何动态值（含格式化后的数值）进入 HTML 模板前只经这里一次；静态字面量
+    与已用 textContent / DOM property 的通道不再转义，避免重复转义。
+    """
+    return escape(str(value), quote=True)
+
+
+def _js_json(value: object) -> str:
+    """内嵌 <script> 的 JSON：把 < 转成 \\u003c，避免 </script> 提前闭合脚本块。"""
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
+
+
 def _dag_js() -> str:
-    """内联到看板的原生 JS：按层级画 DAG 节点与依赖曲线，返工回路用橙色虚线标出。"""
-    return """
-function drawDag(g){
-  const host=document.getElementById('dag');
-  const levels=g.levels, W=host.clientWidth, H=host.clientHeight;
-  const padL=8,padR=8,padT=10,padB=10;
-  const colW=(W-padL-padR)/levels.length;
-  const pos={};
-  levels.forEach((ids,li)=>{
-    const n=ids.length, gap=8, h=(H-padT-padB-gap*(n-1))/n;
-    ids.forEach((id,ni)=>{
-      pos[id]={x:padL+li*colW+4,y:padT+ni*(h+gap),w:colW-26,h:Math.min(h,52)};
-    });
-  });
-  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
-  svg.setAttribute('width',W);svg.setAttribute('height',H);
-  svg.style.position='absolute';svg.style.left=0;svg.style.top=0;svg.style.pointerEvents='none';
-  g.nodes.forEach(n=>{
-    n.deps.forEach(d=>{
-      const a=pos[d],b=pos[n.id];if(!a||!b)return;
-      const x1=a.x+a.w,y1=a.y+16,x2=b.x,y2=b.y+16,dx=Math.max(18,(x2-x1)/2);
-      const p=document.createElementNS('http://www.w3.org/2000/svg','path');
-      p.setAttribute('d',`M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}`);
-      p.setAttribute('fill','none');
-      p.setAttribute('stroke',n.loop?'#E08A3C':'#BFD0E6');
-      p.setAttribute('stroke-width',n.loop?1.6:1.2);
-      if(n.loop)p.setAttribute('stroke-dasharray','4,3');
-      svg.appendChild(p);
-    });
-  });
-  host.appendChild(svg);
-  g.nodes.forEach(n=>{
-    const p=pos[n.id];if(!p)return;
-    const d=document.createElement('div');
-    d.className='node '+(n.loop?'loop ':'')+(n.status==='done'?'done':n.status);
-    d.style.cssText+=`left:${p.x}px;top:${p.y}px;width:${p.w}px;height:${p.h}px`;
-    d.innerHTML=`<div class="id">${n.agent} · ${n.type}</div>${n.label}`+
-      `<div class="st">${n.status==='done'?'✓':''}</div>`;
-    d.title=n.detail||'';
-    host.appendChild(d);
-  });
-}
-"""
+    """返回共享 DAG 渲染 JS 与前端转义函数（单一来源 gcs/webassets.py，防漂移）。"""
+    return DAG_JS
 
 
 def render_console(art: Artifact, pack_version: str, out: Path) -> Path:
@@ -125,41 +112,55 @@ def render_console(art: Artifact, pack_version: str, out: Path) -> Path:
     m = data["metrics"]
     rubric = data["rubric"][-1] if data["rubric"] else {"dims": [], "score": 0, "threshold": 80}
     events = data["events"]
+    audits = data.get("audit", [])
     top_jobs = sorted(data["results"], key=lambda r: r["cost"], reverse=True)[:14]
 
     kpis = [
-        ("SLA 达成率", f"{m['sla_rate'] * 100:.1f}%", "硬约束：截止时间", ""),
-        ("单位算力成本", f"¥{m['cost_per_gpu_hour']:.2f}", "元 / GPU·h", "o"),
-        ("平均绿电占比", f"{m['avg_green_share'] * 100:.1f}%", "作业时段加权", "g"),
-        ("平均排队", f"{m['avg_wait_min']:.0f} min", f"P95 {m['p95_wait_min']:.0f} min", ""),
-        ("返工轮次", f"{data['rounds']}", f"rubric {rubric['score']} / {rubric['threshold']}", "o"),
+        (TERM["sla_rate"], f"{m['sla_rate'] * 100:.1f}%", NOTE["sla_rate"], "",
+         DEFINITION["sla_rate"]),
+        (TERM["cost_per_gpu_hour"], f"¥{m['cost_per_gpu_hour']:.2f}",
+         NOTE["cost_per_gpu_hour"], "o", DEFINITION["cost_per_gpu_hour"]),
+        (TERM["avg_green_share"], f"{m['avg_green_share'] * 100:.1f}%",
+         NOTE["avg_green_share"], "g", DEFINITION["avg_green_share"]),
+        (TERM["avg_wait_min"], f"{m['avg_wait_min']:.0f} min",
+         f"P95 {m['p95_wait_min']:.0f} min（不含执行）", "", DEFINITION["avg_wait_min"]),
+        (TERM["rounds"], f"{data['rounds']}",
+         f"rubric {rubric['score']} / {rubric['threshold']}", "o", DEFINITION["rounds"]),
     ]
     kpi_html = "".join(
-        f'<div class="kpi {c}"><div class="l">{l}</div><div class="v">{v}</div>'
-        f'<div class="s">{s}</div></div>' for l, v, s, c in kpis)
+        f'<div class="kpi {_h(c)}" title="{_h(tip)}"><div class="l">{_h(l)}</div>'
+        f'<div class="v">{_h(v)}</div><div class="s">{_h(s)}</div></div>'
+        for l, v, s, c, tip in kpis)
 
     ev_html = "".join(
-        f'<div class="ev"><div class="sq">#{e["seq"]:02d}</div><div>'
-        f'<span class="st {e["state"]}">{e["state"]}</span>'
-        f'<span class="ag">{e["agent"]}</span>'
-        f'<div class="dt">{e["detail"]}</div></div></div>'
-        for e in events)
+        f'<div class="ev"><div class="sq">#{_h(format(e["seq"], "02d"))}</div><div>'
+        f'<span class="st {_h(e["state"])}">{_h(e["state"])}</span>'
+        f'<span class="ag">{_h(e["agent"])}</span>'
+        f'<span class="tool" title="使用工具">'
+        f'{_h(audits[i]["tool"] if i < len(audits) else "-")}</span>'
+        f'<div class="dt">{_h(e["detail"])}</div></div></div>'
+        for i, e in enumerate(events))
 
     dims = rubric.get("dims", [])
     maxw = max([d["weight"] for d in dims], default=1)
     bars = "".join(
-        f'<div class="bar"><div class="top"><span>{d["name"]}</span>'
-        f'<span>{d["weight"]} 分 · {"通过" if d["passed"] else "未通过"}</span></div>'
+        f'<div class="bar"><div class="top"><span>{_h(d["name"])}</span>'
+        f'<span>{_h(d["weight"])} 分 · {"通过" if d["passed"] else "未通过"}</span></div>'
         f'<div class="track"><div class="fill {"ok" if d["passed"] else "no"}" '
-        f'style="width:{d["weight"] / maxw * 100:.0f}%"></div></div></div>'
+        f'style="width:{_h(format(d["weight"] / maxw * 100, ".0f"))}%"></div></div></div>'
         for d in dims)
 
     rows = "".join(
-        f'<tr><td>{r["job_id"]}</td><td>{r["type"]}</td><td>{r["pool_id"]}</td>'
-        f'<td>{r["start_min"]}</td><td>{r["wait_min"]}</td>'
-        f'<td>¥{r["cost"]:.1f}</td><td>{r["green_share"] * 100:.0f}%</td>'
-        f'<td class="{"good" if r["sla_ok"] else "bad"}">{"达成" if r["sla_ok"] else "超时"}</td></tr>'
+        f'<tr><td>{_h(r["job_id"])}</td><td>{_h(r["type"])}</td>'
+        f'<td>{_h(r["pool_id"])}</td><td>{_h(r["start_min"])}</td>'
+        f'<td>{_h(r["wait_min"])}</td>'
+        f'<td>¥{_h(format(r["cost"], ".1f"))}</td>'
+        f'<td>{_h(format(r["green_share"] * 100, ".0f"))}%</td>'
+        f'<td class="{"good" if r["sla_ok"] else "bad"}">'
+        f'{"达成" if r["sla_ok"] else "超时"}</td></tr>'
         for r in top_jobs)
+
+    defs_html = "".join(f"<li>{_h(text)}</li>" for text in DEFINITION.values())
 
     html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -167,9 +168,9 @@ def render_console(art: Artifact, pack_version: str, out: Path) -> Path:
 <header><div class="wrap" style="padding:0">
   <div class="kicker">2026 第五届“未来杯”创新大赛 · 赛道一 Agent 编排创新应用</div>
   <h1>绿算调度 · 运行看板</h1>
-  <div class="meta">策略组 <b>{data["policy"]}</b>　·　知识包 <b>{pack_version}</b>　·
-    作业 <b>{m["jobs"]}</b> 个　·　模型 <b>{data["llm"].get("mode", "-")}</b>　·
-    token <b>{data["llm"].get("tokens_total", 0)}</b>　·　耗时 <b>{data["elapsed_s"]}s</b></div>
+  <div class="meta">策略组 <b>{_h(data["policy"])}</b>　·　知识包 <b>{_h(pack_version)}</b>　·
+    作业 <b>{_h(m["jobs"])}</b> 个　·　模型 <b>{_h(data["llm"].get("mode", "-"))}</b>　·
+    token <b>{_h(data["llm"].get("tokens_total", 0))}</b>　·　耗时 <b>{_h(data["elapsed_s"])}s</b></div>
 </div></header>
 <div class="wrap">
   <div class="kpis">{kpi_html}</div>
@@ -187,20 +188,22 @@ def render_console(art: Artifact, pack_version: str, out: Path) -> Path:
   </div>
   <div class="row">
     <div class="card"><h2>rubric 评分</h2>
-      <div class="hint">六维加权，阈值 {rubric.get("threshold")} 分；不达阈值触发定向返工</div>
+      <div class="hint">六维加权，阈值 {_h(rubric.get("threshold"))} 分；不达阈值触发定向返工</div>
       <div class="bars">{bars}</div>
-      <div class="hint" style="margin-top:14px">{art.narrative}</div></div>
+      <div class="hint" style="margin-top:14px">{_h(art.narrative)}</div></div>
     <div class="card"><h2>成本最高的作业</h2>
       <div class="hint">按成本降序，SLA 未达成的标红</div>
       <div class="scroll"><table><thead><tr><th>作业</th><th>类型</th><th>资源池</th>
       <th>开始</th><th>等待</th><th>成本</th><th>绿电</th><th>SLA</th></tr></thead>
       <tbody>{rows}</tbody></table></div></div>
   </div>
+  <details class="mdefs"><summary>指标口径（统一定义，与评测产物同源）</summary>
+    <ul>{defs_html}</ul></details>
   <footer><span>绿算调度 GreenCompute-Scheduler · 数据由同一模拟器与同一知识包生成</span>
   <span>2026 未来杯</span></footer>
 </div>
 <script>
-const G={json.dumps(data["dag"], ensure_ascii=False)};
+const G={_js_json(data["dag"])};
 {_dag_js()}
 drawDag(G);
 </script></body></html>"""

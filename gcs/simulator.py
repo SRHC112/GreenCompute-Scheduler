@@ -88,7 +88,7 @@ class RunMetrics:
     cost_per_gpu_hour: float = 0.0
     total_energy_kwh: float = 0.0
     avg_green_share: float = 0.0
-    green_window_ratio: float = 0.0   # 绿电出力 ≥75% 的时段所承载的 GPU 小时占比
+    green_window_ratio: float = 0.0   # 整作业期平均绿电占比 ≥75% 的作业所承载 GPU 小时占比
     total_carbon_kg: float = 0.0
     utilization: float = 0.0
 
@@ -147,7 +147,9 @@ class Cluster:
         return True
 
     def place(self, pool_id: str, start: int, duration: int, gpus: int, job_id: str) -> None:
-        """把一段占用写进池子；调用前必须先用 fits 校验容量。"""
+        """把一段占用写进池子；H5：落位前强制 fits 校验，杜绝未校验导致的超额占位。"""
+        if not self.fits(pool_id, start, duration, gpus):
+            raise ValueError(f"place() 容量不足或参数非法：池 {pool_id} 区间 [{start},{start+duration}) gpus={gpus}")
         self.alloc[pool_id].append((start, start + duration, gpus, job_id))
 
     def relocate_free(self, job_ids: set[str]) -> None:
@@ -243,32 +245,36 @@ def execute(pack: KnowledgePack, cluster: Cluster, jobs: list[Job],
             green_share=green, carbon_kg=energy * (1 - green) * pack.grid_carbon_factor,
             segment=segment,
             sla_ok=end <= job.deadline_min,
-            budget_ok=cost <= job.budget * (1 + pack.constraints.get("max_budget_overrun", 0.0)) + 1e-9,
+            # 键存在性已由知识包加载期校验保证；这里直接取，避免缺键时静默回落 0
+            budget_ok=cost <= job.budget * (1 + pack.constraints["max_budget_overrun"]) + 1e-9,
             green_ok=green >= min_green,
         ))
     return results, aggregate(results, cluster, jobs)
 
 
 def aggregate(results: list[JobResult], cluster: Cluster, jobs: list[Job]) -> RunMetrics:
-    """把逐作业结果汇总成运行级指标：达成率、等待分位、单位成本、绿电窗口占比、碳排。"""
-    n = len(results)
-    if not n:
-        return RunMetrics()
+    """把逐作业结果汇总成运行级指标：达成率、排队等待分位、单位算力成本、绿电窗口作业占比、总碳排。"""
+    n_exec = len(results)
+    n_total = len(jobs)
+    if n_exec == 0:
+        return RunMetrics(jobs=n_total)
+    denom = n_total if n_total else 1
     waits = sorted(r.wait_min for r in results)
-    total_gpu_hours = sum(j.gpu_hours for j in jobs if j.id in {r.job_id for r in results})
+    result_ids = {r.job_id for r in results}
+    green_ids = {r.job_id for r in results if r.green_share >= 0.75}
+    total_gpu_hours = sum(j.gpu_hours for j in jobs if j.id in result_ids)
     m = RunMetrics(
-        jobs=n,
-        sla_rate=sum(r.sla_ok for r in results) / n,
-        budget_rate=sum(r.budget_ok for r in results) / n,
-        green_ok_rate=sum(r.green_ok for r in results) / n,
-        avg_wait_min=sum(r.wait_min for r in results) / n,
-        p95_wait_min=waits[min(n - 1, math.ceil(0.95 * n))],
+        jobs=n_total,
+        sla_rate=sum(r.sla_ok for r in results) / denom,
+        budget_rate=sum(r.budget_ok for r in results) / denom,
+        green_ok_rate=sum(r.green_ok for r in results) / denom,
+        avg_wait_min=sum(r.wait_min for r in results) / n_exec,
+        p95_wait_min=waits[min(n_exec - 1, max(0, math.ceil(0.95 * n_exec) - 1))],
         total_cost=sum(r.cost for r in results),
         cost_per_gpu_hour=sum(r.cost for r in results) / total_gpu_hours if total_gpu_hours else 0.0,
         total_energy_kwh=sum(r.energy_kwh for r in results),
-        avg_green_share=sum(r.green_share for r in results) / n,
-        green_window_ratio=(sum(j.gpu_hours for j in jobs if j.id in
-                                {r.job_id for r in results if r.green_share >= 0.75})
+        avg_green_share=sum(r.green_share for r in results) / n_exec,
+        green_window_ratio=(sum(j.gpu_hours for j in jobs if j.id in green_ids)
                             / total_gpu_hours) if total_gpu_hours else 0.0,
         total_carbon_kg=sum(r.carbon_kg for r in results),
         utilization=cluster.utilization(),
