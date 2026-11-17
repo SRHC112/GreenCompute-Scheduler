@@ -83,6 +83,9 @@ def render_page() -> bytes:
 
 
 RUNS_DIR = ROOT / "runs"
+# 模型在线预检只做一次（首个 /api/run 时触发）：鉴权无效则全程降级，避免每个请求都失败重试
+_LLM_PROBE_DONE = False
+_LLM_PROBE_OK = True
 MAX_BODY = 1024 * 1024          # P1-2.1：请求体上限 1 MiB，超限返回 413
 
 # 作业规模上下限：与 gcs/demo.py::MIN_JOBS/MAX_JOBS 同源。
@@ -144,8 +147,20 @@ def _write_atomic(path: Path, text: str) -> None:
 
 def run_once(jobs_n: int, seed: int, policy_key: str) -> dict:
     """一键生一个可回放运行：先跑通编排，再渲染单文件看板并落入内存缓存。"""
+    global _LLM_PROBE_DONE, _LLM_PROBE_OK
     jobs = make_jobs(PACK, n=jobs_n, seed=seed)
     llm = ModelGateway(token_budget=int(PACK.rework_budget["max_tokens"]))
+    # 启动预检只做一次：鉴权无效时提前降级并明示，避免每个请求都失败重试
+    if llm.online and not _LLM_PROBE_DONE:
+        _LLM_PROBE_DONE = True
+        _LLM_PROBE_OK, reason = llm.probe()
+        if not _LLM_PROBE_OK:
+            print(f"[WARN] {reason}", file=sys.stderr)
+            print("[WARN] 已切换为离线确定性模式：指标数值不变，"
+                  "归因叙述与 rubric 判定改由模板生成。", file=sys.stderr)
+    if llm.online and not _LLM_PROBE_OK:
+        llm.online = False
+        llm.mode = "offline-mock(precheck-failed)"
     art = Orchestrator(PACK, llm=llm, policy=POLICIES[policy_key]).run(jobs)
 
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f")

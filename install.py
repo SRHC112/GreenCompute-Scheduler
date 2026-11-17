@@ -425,12 +425,107 @@ def ensure_venv(root: Path) -> Path:
     return py
 
 
+# 依赖安装的网络策略：代理变量（大小写两套 pip 都会读）、备用镜像源、
+# 以及随包附带的纯 Python 版 PyYAML（完全无网时的降级实现）。
+PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                  "http_proxy", "https_proxy", "all_proxy")
+PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
+VENDOR_YAML_DIR = SCRIPT_DIR / "vendor" / "yaml"
+
+
+def _env_without_proxy() -> dict:
+    """返回剥离全部代理变量的环境副本（不修改 os.environ，避免污染用户环境）。"""
+    env = dict(os.environ)
+    for key in PROXY_ENV_KEYS:
+        env.pop(key, None)
+    env["PIP_PROXY"] = ""            # 显式置空，覆盖 pip 级代理配置
+    env.pop("PIP_INDEX_URL", None)    # 避免与命令行的 -i 相互覆盖
+    return env
+
+
+def _looks_like_proxy_failure(text: str) -> bool:
+    """判断 pip 输出是否属于「代理/连接」类失败（据此给出更准确的中文提示）。"""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in (
+        "proxyerror", "10061", "newconnectionerror",
+        "cannot connect to proxy", "failed to establish a new connection",
+    ))
+
+
+def _install_yaml_offline(root: Path, py: Path) -> str | None:
+    """把随包附带的纯 Python 版 PyYAML 复制进 venv；成功返回版本号，否则 None。
+
+    只复制 ``vendor/yaml/*.py``（不含 C 扩展 ``_yaml.pyd``）。PyYAML 的纯 Python
+    实现与 C 扩展在 ``safe_load`` 语义上一致，仅解析性能略低，用于完全无网的机器。
+    """
+    if not (VENDOR_YAML_DIR / "__init__.py").is_file():
+        return None
+    probe = run([str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                cwd=root)
+    purelib = (probe.stdout or "").strip()
+    if probe.returncode != 0 or not purelib:
+        return None
+    site = Path(purelib)
+    if not site.is_dir():
+        return None
+    target = site / "yaml"
+    try:
+        if target.is_dir():
+            shutil.rmtree(target)
+        shutil.copytree(VENDOR_YAML_DIR, target)
+    except OSError:  # best-effort：复制失败不阻断，由调用方给最终提示
+        _LOG.debug("离线复制 yaml 失败", exc_info=True)
+        return None
+    check = run([str(py), "-c", "import yaml; print(yaml.__version__)"], cwd=root)
+    if check.returncode != 0:  # 复制后不可用则回滚，避免留下坏包
+        shutil.rmtree(target, ignore_errors=True)
+        return None
+    return (check.stdout or "").strip() or "unknown"
+
+
 def install_deps(root: Path, py: Path) -> str:
+    """安装唯一运行时依赖 PyYAML，具备「网络自愈」能力。
+
+    策略依次为：① 沿用当前代理/源直连；② 清除全部代理变量后重试；
+    ③ 改用国内镜像源重试；④ 全部失败则使用随包附带的纯 Python 实现
+    （离线降级，会显式告警，不静默替换）。任一策略成功即进入统一校验。
+    """
     info("安装依赖（PyYAML）……")
-    run_checked([str(py), "-m", "pip", "install", "--disable-pip-version-check",
-                 "-r", "requirements.txt"], cwd=root,
-                hint="若因网络失败，可先设置代理，或手动执行："
-                     "pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple")
+    base_cmd = [str(py), "-m", "pip", "install", "--disable-pip-version-check"]
+    attempts: tuple[tuple[str, dict | None, tuple[str, ...]], ...] = (
+        ("默认源（沿用当前代理设置）", None, ()),
+        ("已清除代理变量（直连）", _env_without_proxy(), ()),
+        (f"已切换到镜像源 {PIP_MIRROR}", _env_without_proxy(), ("-i", PIP_MIRROR)),
+    )
+    last_detail = ""
+    succeeded: str | None = None
+    for label, env, extra in attempts:
+        proc = run([*base_cmd, *extra, "-r", "requirements.txt"], cwd=root, env=env)
+        if proc.returncode == 0:
+            succeeded = label
+            break
+        last_detail = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        if _looks_like_proxy_failure(last_detail):
+            warn(f"依赖安装失败（{label}）：代理/连接不可用，继续尝试下一种方式……")
+        else:
+            warn(f"依赖安装失败（{label}），继续尝试下一种方式……")
+
+    if succeeded is None:
+        warn("三种联网方式均失败，改用随包附带的纯 Python 版 PyYAML（离线降级）……")
+        ver_offline = _install_yaml_offline(root, py)
+        if ver_offline is None:
+            tail = "\n".join(last_detail.splitlines()[-12:])
+            raise InstallError(
+                "依赖安装失败：无法联网安装 PyYAML，且未找到可用的离线副本",
+                "请检查网络或代理后重试；也可手动执行："
+                f"pip install -r requirements.txt -i {PIP_MIRROR}"
+                + ("\n--- 输出末尾 ---\n" + tail if tail else ""),
+            )
+        warn(f"已启用离线降级：随包纯 Python 版 PyYAML {ver_offline}"
+             "（功能一致，仅解析性能略低；联网后重跑本脚本可换回官方 wheel）")
+    elif succeeded != attempts[0][0]:
+        warn(f"依赖安装已通过「{succeeded}」完成")
+
     p = run_checked([str(py), "-c", "import yaml; print(yaml.__version__)"], cwd=root,
                     hint="依赖已安装但无法导入，请检查虚拟环境是否完整。")
     ver = (p.stdout or "").strip() or "unknown"

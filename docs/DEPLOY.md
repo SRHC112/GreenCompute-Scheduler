@@ -66,8 +66,8 @@ git push
 python -m unittest discover -s tests -v        # 回归
 python evaluation/run_eval.py                  # 确认最终评测数据（会覆盖已提交的结果文件）
 git add -A && git commit -m "docs: 更新最终评测结果"
-git tag -a v1.0.1 -m "参赛版本 v1.0.1"
-git push && git push origin v1.0.1
+git tag -a v1.0.3 -m "参赛版本 v1.0.3"
+git push && git push origin v1.0.3
 ```
 
 - 答辩版建议打 tag，便于评委按固定版本复现。
@@ -182,7 +182,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 - [ ] `git ls-remote origin main` 返回的 commit 与本地 `git rev-parse HEAD` 一致；
 - [ ] GitHub 网页端 README 正常渲染，`LICENSE` 显示为 Apache-2.0；
 - [ ] 仓库中不存在 `.env`、`__pycache__`、`runs/run_*`；
-- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，171 个单元测试全绿（其中 12 个为冒烟测试）。
+- [ ] 另找一台机器 `git clone` 后，按 README 第二节安装、第三节运行，190 个单元测试全绿（其中 12 个为冒烟测试）。
 
 ---
 
@@ -198,7 +198,7 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 | `test` job | Ubuntu × Python 3.10/3.11/3.12/3.13，另加 Windows × Python 3.13 |
 | `evaluation` job | Ubuntu × Python 3.13，跑六组对照实验并校验结果完整性 |
 
-**检查项**：`compileall` 语法检查 → 单元测试（全量，171 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
+**检查项**：`compileall` 语法检查 → 单元测试（全量，190 个）→ `gcs.demo` 编排演示 → 看板/指标产物存在性 → 操作台 HTTP 探测（Linux）→ `run_eval.py` 六组实验与结果完整性（18 行 CSV、summary.json 结构与新鲜度、测试组 6 组 × 3 种子）。
 
 **查看结果**：仓库首页 Actions 标签页，或 README 顶部的 CI 徽章。失败的 Artifact 仍会上传，便于下载 `console.html` / `results.csv` 定位问题。
 
@@ -214,6 +214,17 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 ---
 
 ## 十一、一键安装脚本
+
+**执行前提（三条）**
+
+| # | 前提 | 不满足时的表现 / 处理 |
+|---|---|---|
+| 1 | Python 3.10+ | 脚本 `check_python()` 直接中止并给出中文提示；`python` 不在 PATH 时用 `install.bat`（自动查找）或 `bash install.sh`（按版本择优） |
+| 2 | **管理员权限**（Windows：右键「以管理员身份运行」；macOS/Linux：`sudo` 或对项目目录有写权限） | 创建 `.venv`、写启动器、收紧 `.env` ACL 时可能被安全软件/组策略拦截，表现为「项目目录写入探针失败」或 `icacls` 返回非 0 |
+| 3 | **在项目根目录执行**（与 `install.py` 同层） | `python -m gcs.demo` 需要 `gcs` 包在当前导入路径上；`.venv`、`runs/`、`run.bat` 也以项目根为基准生成。`run.bat`/`run.sh` 内部已切目录，位置无关 |
+
+> 项目**不依赖任何环境变量**：不设 `GCS_*` 也能完整跑通（默认离线确定性模式）；`.env` 仅在接入大模型时由安装脚本按需生成。
+> 安装脚本本身只用标准库，因此**无需预先安装任何依赖**（PyYAML 由脚本装入 `.venv`）。
 
 | 文件 | 作用 |
 |---|---|
@@ -237,6 +248,19 @@ git ls-files | grep -E "\.env|__pycache__|runs/run_" || echo "OK: 无敏感/无�
 完整安装路径下，`precheck()` 的知识包语法预检在缺 PyYAML 时会**跳过并明确说明**（不再误报
 「知识包解析失败」），知识包仍会在 venv 装好依赖后由单元测试加载校验——校验不丢失，只是
 推迟到依赖就绪之后。因此全新机器可直接 `python install.py`（自建 venv 并装依赖），无需事先准备。
+
+**网络自愈（v1.0.3 起）**：`install_deps()` 对「装依赖」做了四级重试，全部自动，无需人工干预：
+
+| 次序 | 策略 | 触发条件 | 输出 |
+|---|---|---|---|
+| ① | 默认源（沿用当前代理/镜像配置） | 正常联网 | `[ OK ] 依赖安装完成` |
+| ② | 清除 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（含小写）后直连 | 出现 `ProxyError` / `WinError 10061` | `[WARN] …代理/连接不可用，继续尝试…` |
+| ③ | 追加 `-i https://pypi.tuna.tsinghua.edu.cn/simple` | 直连失败/超时 | `[WARN] 依赖安装已通过「已切换到镜像源…」完成` |
+| ④ | 复制 `vendor/yaml`（PyYAML 6.0.3 纯 Python 实现）进 venv | 三种联网方式全失败 | `[WARN] 已启用离线降级…` |
+
+代理变量只在 `subprocess` 的 `env` 副本中清除，**不修改** `os.environ`；第 ④ 步复制后会回读
+`import yaml` 校验，失败自动回滚（删除半成品目录）并给出含 pip 镜像命令的中文错误。
+因此**完全无外网的机器上，只要 Python 3.10+ 即可装通**。
 
 **CI 校验**：`test` job 增加 `python -m py_compile install.py` 与 `python install.py --check`，
 覆盖全部 5 个平台 / 版本组合；安装脚本不需要任何 Secret。
@@ -297,7 +321,7 @@ python app/server.py
 | `X-Frame-Options` | `DENY` | 禁止被 iframe 嵌套（防点击劫持） |
 | `Referrer-Policy` | `no-referrer` | 不外泄来源页面 |
 | `Content-Security-Policy` | `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` | 页面为单文件内联 JS/CSS，故放开 inline；外部脚本/样式/连接一律阻断 |
-| `Server` | `GreenCompute/1.0.1` | 不回解释器精确版本 |
+| `Server` | `GreenCompute/1.0.3` | 不回解释器精确版本 |
 | `Host` | 白名单校验；缺失 `400`、不在白名单 `403` | 白名单=回环名 + `--host` 绑定地址 + 本机主机名/FQDN/本机 IP；额外域名用 `GCS_ALLOWED_HOSTS=a,b` 追加 |
 
 > 反向代理部署时：HSTS（`Strict-Transport-Security`）应在**代理层**下发（本服务不提供 TLS，自行下发无效）；

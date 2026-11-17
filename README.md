@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
 
 > 面向宁夏（中卫—银川）算力枢纽的**多智能体算力调度编排系统**
-> 2026 第五届"未来杯"创新大赛 · 赛道一：Agent 编排创新应用
+> 2026 第五届"未来杯"创新大赛 · 赛题一：Agent 编排创新应用
 > 仓库：<https://github.com/SRHC112/GreenCompute-Scheduler> · 主分支：`main` · 许可：Apache-2.0
 
 把「一批算力作业交给谁跑、什么时候跑、跑在哪个资源池」这件事，
@@ -35,6 +35,16 @@
 ---
 
 ## 二、安装
+
+> **前置条件（三条，缺一不可）**
+>
+> | # | 前提 | 说明 |
+> |---|---|---|
+> | 1 | **Python 3.10+** | 安装脚本本身只用标准库。若 `python` 未加入 PATH：Windows 用 `install.bat`（会自动查找解释器），macOS/Linux 用 `bash install.sh`（按版本择优） |
+> | 2 | **以管理员身份运行安装脚本** | 安装需要在项目内创建 `.venv`、写入启动器 `run.bat`/`run.sh`，接入大模型时还要收紧 `.env` 的文件 ACL；普通权限在部分机器上会被安全软件或组策略拦截，表现为“写入探针失败”或 `icacls` 失败 |
+> | 3 | **在项目根目录（与 `install.py` 同一层）执行** | 项目**不依赖任何环境变量**，但 `python -m gcs.demo` 要求 `gcs` 包位于当前目录的导入路径上。也可直接用 `run.bat` / `run.sh`（内部已切到项目目录，位置无关） |
+>
+> **无需配置环境变量**：不设置任何 `GCS_*` 变量也能完整跑通（默认离线确定性模式）；`.env` 仅在你接入国产大模型时才需要，且由安装脚本按需生成。
 
 ### 2.1 一键安装（推荐）
 
@@ -87,9 +97,27 @@ python install.py
 > 因此不存在「先改配置后才发现是缺依赖」的误导。完整安装过程中，知识包的语法与取值域
 > 仍会被校验（由安装后的单元测试加载知识包完成），只是推迟到依赖就绪之后。
 
+### 2.3 网络异常或无网环境（v1.0.2 起自动处理）
+
+安装脚本对「装依赖」这一步做了**四级网络自愈**，无需手工干预：
+
+| 次序 | 策略 | 触发条件 |
+|---|---|---|
+| ① | 沿用当前代理/源安装 | 正常情况下一次成功（无任何警告） |
+| ② | **清除代理变量**后直连重试 | 报 `ProxyError` / `WinError 10061`（代理未运行或不可达） |
+| ③ | 改用清华镜像 `-i https://pypi.tuna.tsinghua.edu.cn/simple` | 直连不通或超时 |
+| ④ | 使用随包附带的 **纯 Python 版 PyYAML**（`vendor/yaml/`） | 三种联网方式全部失败 |
+
+第 ④ 步会显式打印中文 `[WARN] 已启用离线降级……`，不会静默替换实现；联网后重跑
+`python install.py` 即可换回官方 wheel。**因此在完全无外网的机器上，只要装有 Python 3.10+，
+也能完成安装。**
+
+> 若需手工排查：`python -m pip config list` 可查看 pip 级配置；脚本只在子进程中清除
+> `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（含小写），**不会修改**系统环境变量。
+
 
 **脚本自动完成的步骤**：预检（Python 版本 / 项目结构 / 写权限）→ 创建 `.venv` 并安装依赖
-→ 跑 147 个单元测试（其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
+→ 跑 190 个单元测试（17 个测试文件，其中 test_smoke.py 12 个是冒烟测试）与一次**离线**编排演示（不消耗模型额度）→ 准备 `runs/` 与运行入口
 → 询问是否接入大模型 → 打印安装结果汇总。任何步骤失败都会给出中文原因与修复建议，退出码非 0。
 
 **唯一的一次交互确认**
@@ -163,13 +191,18 @@ python -c "import yaml; print('PyYAML', yaml.__version__)"
 
 ## 三、运行方法
 
+> **执行位置**：以下命令都在**项目根目录**（与 `install.py` 同一层）执行。
+> 项目不读取任何环境变量（`GCS_*` 全部可选），但 `python -m gcs.demo` 依赖当前目录能导入 `gcs` 包；
+> 若想在任何位置启动，使用安装脚本生成的 `run.bat demo` / `./run.sh demo`（内部已切到项目目录）。
+> 首次安装请以**管理员身份**运行 `install.py`（见第二节前置条件）。
+
 ### 3.1 冒烟测试（先跑这个，确认环境 OK）
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-预期输出：`Ran 147 tests ... OK`，实测耗时约 6 秒（Python 3.13 / Windows）。
+预期输出：`Ran 190 tests ... OK`，实测耗时约 6–30 秒（随机器性能）。
 
 ### 3.2 一键完整编排（核心演示）
 
@@ -213,7 +246,7 @@ python app/server.py --open
 
 - 响应统一带 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`
   与 `Content-Security-Policy`（默认拒绝一切外部加载，只放行内联样式/脚本与同源 `fetch`）；
-- `Server` 头只回 `GreenCompute/1.0.1`，不回解释器精确版本；
+- `Server` 头只回 `GreenCompute/1.0.3`，不回解释器精确版本；
 - `Host` 头走白名单：回环名、`--host` 绑定地址、本机主机名/FQDN 与其解析出的本机 IP；
   需要额外域名时用 `GCS_ALLOWED_HOSTS=域名1,域名2` 追加。缺失 `Host` 回 `400`，不在白名单回 `403`（阻断 DNS rebinding）；
 - `/favicon.ico` 显式回 `204`，控制台不再出现无意义的 404。
@@ -290,7 +323,7 @@ python app/auth_tool.py status      # 查看模式 / 签发时间 / 过期状态
 
 ## 四、验证清单（如何确认跑对了）
 
-1. `python -m unittest discover -s tests -v` → **147 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
+1. `python -m unittest discover -s tests -v` → **190 个单元测试全绿（其中 test_smoke.py 12 个是冒烟测试）**。
 2. **确定性复现**：连续两次执行 `python -m gcs.demo --jobs 20 --seed 7`，对比两次 `runs/run_*/metrics.json`，核心指标应完全一致。
 3. `runs/latest.html` 存在且浏览器可打开，页面不依赖外网。
 4. `python evaluation/run_eval.py` 后 `evaluation/results.csv` 含 6 组 × 3 种子的数据行；
@@ -393,7 +426,7 @@ GreenCompute-Scheduler/
 │   ├── server.py                  零依赖可视化操作台（仅标准库）
 │   ├── auth.py                    静态 Token 分级鉴权（仅标准库、fail-closed）
 │   └── auth_tool.py               凭据生成 / 轮换 / 状态 CLI
-├── tests/                         单元测试合计 147 个（12 个文件）
+├── tests/                         单元测试合计 190 个（17 个文件）
 │   ├── test_smoke.py              12 个冒烟测试（知识包 / 确定性 / 编排收敛 / 指标有限性）
 │   ├── test_verifier.py           12 个五层验证器用例
 │   ├── test_reflect.py            12 个自省 rubric / 归因 / 返工用例

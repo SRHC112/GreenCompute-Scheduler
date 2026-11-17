@@ -89,6 +89,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     jobs = make_jobs(pack, n=args.jobs, seed=args.seed)
     llm = ModelGateway(token_budget=int(pack.rework_budget["max_tokens"]))
+    # 启动预检：在线配置先验一次「地址可达 + 密钥被接受」。
+    # 鉴权失败时提前降级并明示原因，避免逐个作业反复失败、且让用户误以为结果是模型产出。
+    if llm.online:
+        ok, reason = llm.probe()
+        if not ok:
+            print(f"[WARN] {reason}", file=sys.stderr)
+            print("[WARN] 已切换为离线确定性模式：指标数值不变，"
+                  "归因叙述与 rubric 判定改由模板生成。", file=sys.stderr)
+            llm.online = False
+            llm.mode = "offline-mock(precheck-failed)"
     art = Orchestrator(pack, llm=llm, policy=POLICIES[args.policy]).run(jobs)
 
     run_id = datetime.now().strftime("run_%Y%m%d_%H%M%S_%f") + f"_{args.policy}"

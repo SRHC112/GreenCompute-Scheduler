@@ -2,9 +2,9 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格。
 
-## [Unreleased] - 2026-11-15
+## [Unreleased] - 2026-11-16
 
-当前版本：1.0.1（未发布），变更日期 2026-11-15。
+当前版本：1.0.3（未发布），变更日期 2026-11-16。
 
 ### Added
 - `gcs/knowledge.py`：知识包 `schema_version` 字段（整数，缺省视为 1），校验错误开始区分「版本过低，请补齐以下键」与「配置值非法」。
@@ -61,6 +61,78 @@
 - `.gitattributes` 补全（`*.ini` / `*.html` / `*.example` / `LICENSE`），`*.csv` 设 `-text` 以保留 RFC 4180 的 CRLF 行尾。
 - `install.bat` 改为 **CRLF + 纯 ASCII**、含 `exit /b %GCS_RC%` 退出码透传、移除 `pause`（避免 CI 挂起）。
 - 两份交付 zip（`参赛提交_2026未来杯.zip` / `GreenCompute-Scheduler_源码_aaa知足常乐.zip`）按当前源重建，逐文件 SHA256 与源一致，`install.sh` 保留 0755 执行位。
+
+## [1.0.3] - 2026-11-16
+
+模型调用的「失败可见性」与「重试成本」修复（对应实机问题：接入 DeepSeek 后 `run.bat demo` 长时间无输出）。
+
+### 背景（实机风险）
+- 用户接入 API Key 后运行 `run.bat demo`，终端长时间无任何输出。
+- 定位：`.env` 中密钥损坏（仅 1 字节控制符 `0x16`）且模型名 `dsh-v4.1` 非官方（DeepSeek 仅支持
+  `deepseek-chat` / `deepseek-reasoner`）；服务端返回 `HTTP 400/401`。
+- 放大因素（代码缺陷）：`OpenAICompatAdapter.complete` 把 **4xx 也当限流重试**（3 次 + 退避 0.5/1.5/3s），
+  且单次超时 60s——网络挂起时单次调用最坏 `60×3+5 = 185s`；而降级只写入产物字段，**终端无任何提示**，
+  用户无法区分「在算」与「已降级」。
+
+### Fixed
+- `gcs/llm.py::OpenAICompatAdapter`：**4xx（429 除外）不再重试**，立即上抛交给网关降级；
+  429/5xx/网络超时仍按 0.5s/1.5s/3s 退避重试。
+- `gcs/llm.py`：单次请求超时 **60s → 15s**（接口无响应时不再长时间挂起）。
+- `gcs/llm.py::ModelGateway`：新增 `_warn_degraded_once()`——首次降级向 stderr 打印一条中文 `[WARN]`，
+  按 HTTP 状态码给出可操作提示（401/403 鉴权、404 模型不存在、429 限流），连续调用不重复打印。
+- `gcs/llm.py`：新增 `probe()` 启动预检——只验证「地址可达 + 密钥被接受」，不发推理请求；
+  401/403 判失败、404/405 判通过（不阻断）、网络异常给出中文说明。
+- `gcs/demo.py` / `app/server.py`：启动时调用预检；鉴权失败即提前降级为离线模式并明示原因，
+  避免逐作业反复失败（`app/server.py` 用模块级标志保证只探测一次）。
+
+### Added
+- `tests/test_llm_retry_20261116.py`：11 个用例——4xx 不重试、429/5xx/超时重试、默认超时 15s、
+  降级告警去重、预检四种判定（2xx/401/404/网络异常）。
+
+### Changed
+- 单元测试 179 → **190**（18 个测试文件）；覆盖率 87% → **88%**。
+- 实机验证：无效密钥场景 **5.5 秒**完成（原最坏 185 秒/次调用），输出两条明确告警，
+  产物 `llm.mode = offline-mock(precheck-failed)`、`calls = 1`；离线模式与指标数值完全不变。
+- 版本号统一 **1.0.3**。
+
+---
+
+## [1.0.2] - 2026-11-16
+
+安装健壮性修复：让「其他电脑仅运行脚本」在**代理异常**与**完全无网**两种情况下也能装通。
+
+### 背景（实机风险）
+- 用户在装有 Python 3.14.2 的机器上执行 `python install.py`，`--check` 通过但完整安装失败：
+  pip 报 `ProxyError` / `WinError 10061`（目标计算机积极拒绝），重试 4 次后以
+  `No matching distribution found for PyYAML` 结束。根因是环境变量中存在指向**未运行端口**的
+  `HTTP_PROXY`/`HTTPS_PROXY`（`http://127.0.0.1:<port>`），pip 继承后无法建立连接。
+- 同一机器上曾出现「13 errors + 1 failure」，经核查全部为 `No module named 'yaml'`
+  （依赖未装上的下游后果），**与 Python 3.14 无关**；补装依赖后 179 个用例在 3.14.2 下全绿。
+
+### Added
+- `vendor/yaml/`：随包附带 PyYAML 6.0.3 **纯 Python 实现**（17 个 `.py`，不含 C 扩展），
+  另附 `vendor/LICENSE-PyYAML.txt`（MIT）。逐文件 SHA-256 与官方 wheel `RECORD` 一致。
+- `tests/test_install_offline_20261116.py`：8 个用例，覆盖代理失败识别、环境变量清理、
+  分级重试、离线降级、无副本时报错、vendor 副本无二进制且可独立 import。
+
+### Fixed
+- `install.py::install_deps` 改为**四级网络自愈**：① 默认源（沿用当前代理）；② 清除全部代理
+  变量（大小写两套）直连重试；③ 追加 `-i https://pypi.tuna.tsinghua.edu.cn/simple`；
+  ④ 全部失败则复制 `vendor/yaml` 进 venv 完成安装（离线降级）。任一降级均输出中文 `[WARN]`，
+  不静默替换；复制后回读校验，失败自动回滚。
+- 代理变量只在 `subprocess` 的 `env` 副本中清除，**不修改** `os.environ`，不污染用户环境。
+
+### Changed
+- 单元测试 171 → **179**（17 个测试文件）；项目文件 76 → **95**；提交包 79 → **98**；
+  两份交付 zip 分别 2.17 MB / 352 KB。
+- 版本号统一 **1.0.2**（`gcs/__init__.py`、`Server` 头、README、DEPLOY、性能与并发、
+  部署边界与排查手册、第三方声明）。
+- 联网正常时行为不变：首次 `pip install` 即成功，无任何警告（已实测）。
+- 文档补充**三条执行前提**（README 第二节、`docs/DEPLOY.md` 第十一节、`docs/部署边界与排查手册.md` §3.1）：
+  ① Python 3.10+；② **以管理员身份运行安装脚本**；③ **在项目根目录执行**。
+  同时明确「项目不依赖任何环境变量，`GCS_*` 全部可选」——`GCS_STRICT_AUTH` 等仅用于加固。
+
+---
 
 ## [1.0.1] - 2026-11-15
 

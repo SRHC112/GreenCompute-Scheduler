@@ -74,8 +74,10 @@ class OpenAICompatAdapter:
 
     name = "openai-compat"
 
-    def __init__(self, timeout: int = 60, max_retries: int = 3):
-        """timeout 为单次请求超时秒数；max_retries 为限流退避重试次数（0.5s/1.5s/3s）。"""
+    def __init__(self, timeout: int = 15, max_retries: int = 3):
+        """timeout 为单次请求超时秒数（默认 15s：接口无响应时不应让演示干等）；
+        max_retries 仅适用于**可重试**错误（429 限流 / 5xx / 网络超时），退避 0.5s/1.5s/3s。
+        4xx（除 429）属永久性错误——密钥无效、模型不存在、参数非法，重试无意义，立即上抛。"""
         self.timeout = timeout
         self.max_retries = max_retries
 
@@ -99,8 +101,14 @@ class OpenAICompatAdapter:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"].strip()
-            except (urllib.error.URLError, urllib.error.HTTPError,
-                    KeyError, TimeoutError) as exc:
+            except urllib.error.HTTPError as exc:
+                # 4xx（429 限流除外）是永久性错误：密钥无效 / 模型不存在 / 参数非法。
+                # 对它们重试只会白等（每次 timeout×3 + 退避），必须立即上抛交给网关降级。
+                if 400 <= exc.code < 500 and exc.code != 429:
+                    raise
+                last_error = exc
+                time.sleep(0.5 * (3 ** attempt))
+            except (urllib.error.URLError, KeyError, TimeoutError) as exc:
                 last_error = exc
                 time.sleep(0.5 * (3 ** attempt))
         raise last_error or RuntimeError("模型调用失败")
@@ -148,6 +156,7 @@ class ModelGateway:
         self.latency_ms = 0.0
         self.online = bool(self.base_url and self.api_key and self.base_url_secure)
         self.mode = "online" if self.online else "offline-mock"
+        self._warned = False  # 降级提示只打一次，避免 N 次调用刷屏
         # 分层记账：primary / light 各自记录实际使用的模型与 token 用量
         self.tier_stats: dict[str, dict] = {
             "primary": {"model": "", "calls": 0, "tokens_in": 0, "tokens_out": 0},
@@ -183,6 +192,7 @@ class ModelGateway:
                                      model=self._resolve_model(tier))
             except Exception as exc:  # 网络/额度异常一律降级，不让演示挂掉
                 self.mode = f"degraded({type(exc).__name__})"
+                self._warn_degraded_once(exc)
                 text = self._mock(system, user)
         else:
             text = self._mock(system, user)
@@ -195,6 +205,52 @@ class ModelGateway:
         ts["tokens_in"] += _count(system + user)
         ts["tokens_out"] += _count(text)
         return text
+
+    def _warn_degraded_once(self, exc: Exception) -> None:
+        """降级只提示一次：既不刷屏，也保证用户不会误以为结果是模型产出。"""
+        if self._warned:
+            return
+        self._warned = True
+        detail = (f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError)
+                  else type(exc).__name__)
+        hint = ""
+        if isinstance(exc, urllib.error.HTTPError):
+            if exc.code in (401, 403):
+                hint = "（鉴权失败：请确认 GCS_LLM_API_KEY 与 GCS_LLM_BASE_URL 属于同一服务商）"
+            elif exc.code == 404:
+                hint = "（模型或路径不存在：请确认 GCS_LLM_MODEL 为服务商支持的模型名）"
+            elif exc.code == 429:
+                hint = "（触发限流：请降低并发或稍后重试）"
+        print(f"[WARN] 模型调用失败（{detail}），已降级为离线确定性模板："
+              f"本次归因叙述与 rubric 判定不来自模型{hint}", file=sys.stderr)
+
+    def probe(self, timeout: int | None = None) -> tuple[bool, str]:
+        """启动前轻量预检：只验证「地址可达 + 密钥被接受」，不发推理请求。
+
+        返回 ``(ok, 中文说明)``。判定约定：
+        - 2xx 通过；
+        - 401/403 判失败（鉴权问题，继续跑只会反复降级，不如提前降级）；
+        - 404/405 视为「该服务不提供 /models」，判通过（交给真实调用判定）；
+        - 网络异常判失败，并给出可操作提示。
+        """
+        if not self.online:
+            return False, "未配置在线模型（GCS_LLM_BASE_URL / GCS_LLM_API_KEY 缺失）"
+        req = urllib.request.Request(
+            f"{self.base_url}/models",
+            headers={"Authorization": f"Bearer {self.api_key}"})
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=timeout or min(self.adapter.timeout, 10)) as resp:
+                return (200 <= resp.status < 300), f"预检返回 HTTP {resp.status}"
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return False, (f"鉴权失败（HTTP {exc.code}）：API Key 无效，"
+                               "或该 Key 与 GCS_LLM_BASE_URL 不属于同一服务商")
+            if exc.code in (404, 405):
+                return True, "该服务未提供 /models，跳过预检"
+            return False, f"预检失败（HTTP {exc.code}）"
+        except Exception as exc:
+            return False, f"网络不可达（{type(exc).__name__}）：{exc}"
 
     def _request(self, system: str, user: str, temperature: float,
                  model: str | None = None) -> str:
